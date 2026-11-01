@@ -1,6 +1,7 @@
 import { NextRequest } from 'next/server'
 import { db } from '@/lib/db'
-import { ok, handleError, HttpError, requireUser, requireVendor } from '@/lib/api'
+import { ok, handleError, HttpError, requireUser, requireVendor, canAccessOrder, round2 } from '@/lib/api'
+import { getSessionUser } from '@/lib/auth'
 import type { DocBank, DocData, DocLine, DocParty, DocRequestKind } from '@/lib/documents'
 
 /**
@@ -72,7 +73,7 @@ const isAdmin = (role: string) => role === 'PLATFORM_ADMIN' || role === 'PLATFOR
 /* ---------------------------------------------------------------- orders */
 
 async function orderDoc(kind: 'invoice' | 'proforma' | 'purchase-return', id: string): Promise<DocData> {
-  const user = await requireUser()
+  const user = await getSessionUser()
   const order = await db.order.findUnique({
     where: { id },
     include: {
@@ -81,7 +82,7 @@ async function orderDoc(kind: 'invoice' | 'proforma' | 'purchase-return', id: st
     },
   })
   if (!order) throw new HttpError('Order not found', 404)
-  if (order.userId !== user.id && !isAdmin(user.role)) throw new HttpError('Order not found', 404)
+  if (!(await canAccessOrder(order, user))) throw new HttpError('Order not found', 404)
 
   const biz = await loadBusiness()
   let addr: Record<string, string | null | undefined> = {}
@@ -133,6 +134,12 @@ async function orderDoc(kind: 'invoice' | 'proforma' | 'purchase-return', id: st
   const paid = order.paymentStatus === 'PAID' || (order.paymentMethod === 'COD' && ['DELIVERED', 'COMPLETED'].includes(order.status))
   const tax = kind === 'invoice' && paid
   const discount = order.discountTotal > 0 ? order.discountTotal : order.couponDiscount
+  const activeItemsSum = round2(items.reduce((s, i) => s + i.qty * i.unitPrice, 0))
+  const codFee =
+    order.paymentMethod === 'COD'
+      ? round2(Math.max(0, order.grandTotal - (order.itemsTotal - discount + order.shippingTotal)))
+      : 0
+  void activeItemsSum
 
   return {
     kind: tax ? 'TAX_INVOICE' : 'PROFORMA_INVOICE',
@@ -153,6 +160,7 @@ async function orderDoc(kind: 'invoice' | 'proforma' | 'purchase-return', id: st
     discount,
     discountLabel: order.couponCode ? `Coupon (${order.couponCode})` : 'Discount',
     shipping: order.shippingTotal,
+    codFee,
     gstRate: biz.gstRate,
     interState: isInterState(biz.party, customer),
     notes: tax ? [] : ['This is a proforma invoice and not a demand for payment under GST. A tax invoice is issued once payment is received.'],

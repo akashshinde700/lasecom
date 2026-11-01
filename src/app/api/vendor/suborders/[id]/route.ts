@@ -1,13 +1,13 @@
 import type { NextRequest } from 'next/server'
-import { ok, handleError, requireActiveVendor } from '@/lib/api'
+import { ok, handleError, requireVendorPermission } from '@/lib/api'
 import { updateSubOrderStatus } from '@/lib/suborder'
 
 type Params = { params: Promise<{ id: string }> }
 
-// ---------------- POST: update sub-order status (vendor-isolated, active vendor only) ----------------
+// ---------------- POST: update sub-order status (vendor-isolated, active vendor, owner or ORDER_MANAGER) ----------------
 export async function POST(req: NextRequest, { params }: Params) {
   try {
-    const { user, vendor } = await requireActiveVendor()
+    const { user, vendor } = await requireVendorPermission('orders')
     const { id } = await params
     const body = (await req.json().catch(() => ({}))) as Record<string, unknown>
 

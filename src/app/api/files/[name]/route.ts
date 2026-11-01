@@ -8,7 +8,7 @@ export async function GET(_req: NextRequest, { params }: { params: Promise<{ nam
   const { name } = await params
   if (!UPLOAD_NAME_RE.test(name)) return new Response('Not found', { status: 404 })
   try {
-    const data = await readFile(path.join(uploadDir(), name))
+    const data = await readFile(path.join(/*turbopackIgnore: true*/ uploadDir(), name))
     const ext = name.split('.').pop() as string
     return new Response(new Uint8Array(data), {
       headers: {

@@ -37,10 +37,6 @@ const PAYMENT_METHOD_LABEL: Record<string, string> = {
   RAZORPAY: 'Razorpay', UPI: 'UPI', CARD: 'Card', NETBANKING: 'NetBanking', COD: 'COD',
 }
 
-const IN_PROGRESS = ['CONFIRMED', 'PROCESSING', 'PACKED', 'SHIPPED', 'PARTIALLY_SHIPPED']
-const DELIVERED = ['DELIVERED', 'COMPLETED']
-const CANCELLED = ['CANCELLED']
-
 export default function OrdersView() {
   const user = useAppStore((s) => s.user)
   const authLoading = useAppStore((s) => s.authLoading)
@@ -64,30 +60,28 @@ export default function OrdersView() {
   }, [authLoading, user, navigate, params.redirect])
 
   const fetchOrders = useCallback((p: number) => {
+    const qs = new URLSearchParams({ page: String(p) })
+    if (tab !== 'all') qs.set('status', tab)
     api<{ items: OrderListItem[]; total: number; page: number; pages: number }>(
-      `/api/orders?page=${p}`
+      `/api/orders?${qs.toString()}`
     ).then((res) => {
       if (!res.ok || !res.data) {
         setError(res.error ?? 'Could not load orders')
         setOrders([])
         return
       }
+      setError(null)
       setOrders(res.data.items)
       setPages(res.data.pages)
       setPage(res.data.page)
     })
-  }, [])
+  }, [tab])
 
   useEffect(() => {
     if (user) fetchOrders(1)
   }, [user, fetchOrders])
 
-  const filtered = (orders ?? []).filter((o) => {
-    if (tab === 'progress') return IN_PROGRESS.includes(o.status)
-    if (tab === 'delivered') return DELIVERED.includes(o.status)
-    if (tab === 'cancelled') return CANCELLED.includes(o.status)
-    return true
-  })
+  const filtered = orders ?? []
 
   const cancelOrder = async (id: string) => {
     setCancelling(true)

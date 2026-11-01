@@ -63,6 +63,7 @@ type OrderDetail = {
   itemsTotal: number
   discountTotal: number
   shippingTotal: number
+  codFee?: number
   grandTotal: number
   couponCode: string | null
   couponDiscount: number
@@ -111,29 +112,27 @@ export default function OrderDetailView() {
   const [returnComment, setReturnComment] = useState('')
   const [returnBusy, setReturnBusy] = useState(false)
 
-  /* Auth gate */
-  useEffect(() => {
-    if (!authLoading && !user) {
-      toast.error('Please login to view your order')
-      navigate('auth', { redirect: 'order-detail' })
-    }
-  }, [authLoading, user, navigate])
-
   const fetchOrder = useCallback(() => {
     const id = params.id
     if (!id) return
     api<{ order: OrderDetail }>(`/api/orders/${id}`).then((res) => {
       if (!res.ok || !res.data) {
+        if (!user && (res.error ?? '').toLowerCase().includes('sign in')) {
+          toast.error('Please login to view your order')
+          navigate('auth', { redirect: 'order-detail', id })
+          return
+        }
         setError(res.error ?? 'Could not load order')
         return
       }
+      setError(null)
       setOrder(res.data.order)
     })
-  }, [params.id])
+  }, [params.id, user, navigate])
 
   useEffect(() => {
-    if (user) fetchOrder()
-  }, [user, fetchOrder])
+    if (!authLoading) fetchOrder()
+  }, [authLoading, fetchOrder])
 
   const retryPayment = async () => {
     if (!order) return
@@ -234,7 +233,6 @@ export default function OrderDetailView() {
       </div>
     )
   }
-  if (!user) return null
 
   if (!params.id) {
     return (
@@ -576,6 +574,25 @@ export default function OrderDetailView() {
                   {order.shippingTotal === 0 ? 'FREE' : formatINR2(order.shippingTotal)}
                 </span>
               </div>
+              {(() => {
+                const codFeeVal =
+                  typeof order.codFee === 'number'
+                    ? order.codFee
+                    : Math.max(
+                        0,
+                        Math.round(
+                          (order.grandTotal -
+                            (order.itemsTotal - order.couponDiscount + order.shippingTotal)) *
+                            100
+                        ) / 100
+                      )
+                return codFeeVal > 0 ? (
+                  <div className="flex justify-between text-stone-600">
+                    <span>COD handling fee</span>
+                    <span className="font-medium text-stone-900">{formatINR2(codFeeVal)}</span>
+                  </div>
+                ) : null
+              })()}
               <Separator />
               <div className="flex justify-between text-base font-bold text-stone-900">
                 <span>Grand Total</span>

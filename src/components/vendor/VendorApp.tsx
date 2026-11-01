@@ -127,7 +127,8 @@ export default function VendorApp() {
   const [dashVersion, setDashVersion] = useState(0)
 
   const isVendor = !!user && (user.role === 'VENDOR_ADMIN' || user.role === 'VENDOR_STAFF')
-  const readOnly = user?.role === 'VENDOR_STAFF'
+  const isOwner = user?.role === 'VENDOR_ADMIN'
+  const staffRole = user?.staffRole ?? null
 
   useEffect(() => {
     document.title = 'Vendor Panel — Lastrivon Kart India'
@@ -170,6 +171,20 @@ export default function VendorApp() {
 
   const vendorName = dash?.vendor.name ?? user.vendor?.name ?? 'Vendor Store'
   const bannerStatus = dash?.vendor.status ?? user.vendor?.status ?? 'ACTIVE'
+  const isBlockedVendor = bannerStatus === 'SUSPENDED' || bannerStatus === 'REJECTED'
+  const isActiveVendor = bannerStatus === 'ACTIVE'
+  const canEditProducts = !isBlockedVendor && (isOwner || staffRole === 'PRODUCT_MANAGER')
+  const canAdjustStock =
+    !isBlockedVendor && (isOwner || staffRole === 'PRODUCT_MANAGER' || staffRole === 'INVENTORY_MANAGER')
+  const canManageOrders = isActiveVendor && (isOwner || staffRole === 'ORDER_MANAGER')
+  const canManageReturns = isActiveVendor && (isOwner || staffRole === 'ORDER_MANAGER')
+  const canViewFinance = isOwner || staffRole === 'ACCOUNTANT'
+  const visibleNav = NAV.filter((item) => {
+    if (item.id === 'finance') return canViewFinance
+    if (item.id === 'staff' || item.id === 'store') return isOwner
+    return true
+  })
+  const currentTab: TabId = visibleNav.some((item) => item.id === activeTab) ? activeTab : 'dashboard'
   const initials = user.name
     .split(' ')
     .map((w) => w[0])
@@ -238,8 +253,8 @@ export default function VendorApp() {
       <div className="flex flex-1">
         {/* Desktop sidebar */}
         <aside className="hidden w-56 shrink-0 flex-col gap-1 border-r bg-stone-50 p-3 lg:flex">
-          {NAV.map((item) => {
-            const active = activeTab === item.id
+          {visibleNav.map((item) => {
+            const active = currentTab === item.id
             const Icon = item.icon
             return (
               <button
@@ -271,8 +286,8 @@ export default function VendorApp() {
             className="overflow-x-auto border-b bg-white lg:hidden"
           >
             <div className="flex gap-1 px-3 py-2">
-              {NAV.map((item) => {
-                const active = activeTab === item.id
+              {visibleNav.map((item) => {
+                const active = currentTab === item.id
                 const Icon = item.icon
                 return (
                   <button
@@ -295,26 +310,35 @@ export default function VendorApp() {
           <div className="mx-auto max-w-6xl space-y-4 p-4 md:p-6">
             {bannerStatus !== 'ACTIVE' && <StatusBanner status={bannerStatus} />}
 
-            {activeTab === 'dashboard' && (
+            {currentTab === 'dashboard' && (
               <DashboardSection
                 data={dash}
                 loading={dashLoading}
                 error={dashError}
                 onRetry={refreshDash}
                 onGotoProducts={() => setActiveTab('products')}
-                readOnly={readOnly}
+                readOnly={!canEditProducts}
               />
             )}
-            {activeTab === 'products' && (
-              <ProductsSection dash={dash} readOnly={readOnly} onDashChanged={refreshDash} />
+            {currentTab === 'products' && (
+              <ProductsSection
+                dash={dash}
+                readOnly={!canEditProducts}
+                canAdjustStock={canAdjustStock}
+                onDashChanged={refreshDash}
+              />
             )}
-            {activeTab === 'orders' && (
-              <OrdersSection readOnly={readOnly} onDashChanged={refreshDash} />
+            {currentTab === 'orders' && (
+              <OrdersSection readOnly={!canManageOrders} onDashChanged={refreshDash} />
             )}
-            {activeTab === 'returns' && <ReturnsSection onDashChanged={refreshDash} />}
-            {activeTab === 'finance' && <FinanceSection />}
-            {activeTab === 'staff' && <StaffSection readOnly={readOnly} />}
-            {activeTab === 'store' && <StoreSection dash={dash} onSaved={refreshDash} />}
+            {currentTab === 'returns' && (
+              <ReturnsSection readOnly={!canManageReturns} onDashChanged={refreshDash} />
+            )}
+            {currentTab === 'finance' && canViewFinance && <FinanceSection />}
+            {currentTab === 'staff' && isOwner && <StaffSection readOnly={isBlockedVendor} />}
+            {currentTab === 'store' && isOwner && (
+              <StoreSection dash={dash} readOnly={isBlockedVendor} onSaved={refreshDash} />
+            )}
           </div>
         </main>
       </div>

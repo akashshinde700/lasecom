@@ -1,7 +1,7 @@
 import { NextResponse } from 'next/server'
-import { getSessionUser, type SessionUser } from '@/lib/auth'
+import { getSessionUser, hasGuestOrderAccess, type SessionUser } from '@/lib/auth'
 import { db } from '@/lib/db'
-import type { Vendor, VendorStaff } from '@prisma/client'
+import type { Prisma, Vendor, VendorStaff } from '@prisma/client'
 
 export class HttpError extends Error {
   status: number
@@ -48,6 +48,38 @@ export async function requirePlatformAdmin(): Promise<SessionUser> {
   return user
 }
 
+/**
+ * Verifies whether the current caller may view/pay/cancel an order:
+ * - Platform admins/staff: allowed
+ * - Registered customer order (`order.userId`): must match `user.id`
+ * - Guest order (`!order.userId`): must hold the HMAC-signed `sk_guest_orders`
+ *   cookie for `order.id` OR supply matching `emailParam` (when permitted).
+ */
+export async function canAccessOrder(
+  order: { id: string; userId: string | null; guestEmail?: string | null },
+  user: SessionUser | null,
+  opts?: { emailParam?: string; allowEmailFallback?: boolean }
+): Promise<boolean> {
+  if (user && (user.role === 'PLATFORM_ADMIN' || user.role === 'PLATFORM_STAFF')) {
+    return true
+  }
+  if (order.userId) {
+    return !!user && user.id === order.userId
+  }
+  if (await hasGuestOrderAccess(order.id)) {
+    return true
+  }
+  if (
+    opts?.allowEmailFallback &&
+    opts.emailParam &&
+    order.guestEmail &&
+    opts.emailParam.trim().toLowerCase() === order.guestEmail.trim().toLowerCase()
+  ) {
+    return true
+  }
+  return false
+}
+
 export type VendorContext = {
   user: SessionUser
   vendor: Vendor
@@ -57,7 +89,6 @@ export type VendorContext = {
 /**
  * Vendor isolation: resolves the vendor this user may act on.
  * VENDOR_ADMIN -> own vendor; VENDOR_STAFF -> assigned vendor.
- * Suspended/PENDING vendors are read-only for most mutations (checked by caller).
  */
 export async function requireVendor(): Promise<VendorContext> {
   const user = await requireUser()
@@ -67,10 +98,10 @@ export async function requireVendor(): Promise<VendorContext> {
     return { user, vendor, staffRole: null }
   }
   if (user.role === 'VENDOR_STAFF') {
-    const staff = await db.vendorStaff.findUnique({
+    const staff = (await db.vendorStaff.findUnique({
       where: { userId: user.id },
       include: { vendor: true },
-    }) as (VendorStaff & { vendor: Vendor }) | null
+    })) as (VendorStaff & { vendor: Vendor }) | null
     if (!staff) throw new HttpError('Staff profile not found', 404)
     return { user, vendor: staff.vendor, staffRole: staff.staffRole }
   }
@@ -91,6 +122,81 @@ export async function requireActiveVendor(ctx?: VendorContext): Promise<VendorCo
     throw new HttpError('Your vendor account is not active. Please contact platform support.', 403)
   }
   return c
+}
+
+export type VendorPermission = 'products' | 'inventory' | 'orders' | 'returns' | 'finance' | 'owner'
+
+const STAFF_PERMISSIONS: Record<string, VendorPermission[]> = {
+  PRODUCT_MANAGER: ['products', 'inventory'],
+  INVENTORY_MANAGER: ['inventory'],
+  ORDER_MANAGER: ['orders', 'returns'],
+  ACCOUNTANT: ['finance'],
+}
+
+/**
+ * Role-scoped + vendor-status-enforced guard for `/api/vendor/**` routes.
+ * - Blocks SUSPENDED / REJECTED vendors on mutations (`requireNotSuspended`).
+ * - Requires ACTIVE vendor status unless `allowPending` is true (e.g. product setup while awaiting KYC).
+ * - Enforces `VendorStaff.staffRole` permissions when caller is `VENDOR_STAFF`.
+ */
+export async function requireVendorPermission(
+  permission: VendorPermission,
+  opts?: { allowPending?: boolean; readOnly?: boolean }
+): Promise<VendorContext> {
+  const ctx = await requireVendor()
+  if (!opts?.readOnly) {
+    if (ctx.vendor.status === 'SUSPENDED' || ctx.vendor.status === 'REJECTED') {
+      throw new HttpError('Your vendor account is suspended or rejected. Mutations are disabled.', 403)
+    }
+    if (!opts?.allowPending && ctx.vendor.status !== 'ACTIVE') {
+      throw new HttpError('Your vendor account is awaiting platform approval.', 403)
+    }
+  }
+  if (ctx.staffRole !== null) {
+    const allowed = STAFF_PERMISSIONS[ctx.staffRole] ?? []
+    if (!allowed.includes(permission)) {
+      throw new HttpError('You do not have permission for this vendor section', 403)
+    }
+  }
+  return ctx
+}
+
+/**
+ * Reverses the exact remaining net credit (`CREDIT - DEBIT`) recorded on
+ * `VendorLedger` for a cancelled `SubOrder`. Idempotent: if already reversed
+ * (or never credited), returns 0 without inserting duplicate debits.
+ */
+export async function reverseSubOrderLedgerTx(
+  tx: Prisma.TransactionClient,
+  vendorId: string,
+  subOrderId: string,
+  notes: string
+): Promise<number> {
+  const entries = await tx.vendorLedger.findMany({
+    where: { vendorId, subOrderId },
+    select: { direction: true, amount: true },
+  })
+  const netCredited = round2(
+    entries.reduce((sum, e) => sum + (e.direction === 'CREDIT' ? e.amount : -e.amount), 0)
+  )
+  if (netCredited <= 0) return 0
+  await tx.vendorLedger.create({
+    data: {
+      vendorId,
+      subOrderId,
+      type: 'REFUND_DEBIT',
+      direction: 'DEBIT',
+      amount: netCredited,
+      notes,
+    },
+  })
+  return netCredited
+}
+
+/** Storefront visibility filter: platform 1P products OR products of ACTIVE vendors only. */
+export const PUBLIC_PRODUCT_WHERE: Prisma.ProductWhereInput = {
+  status: 'ACTIVE',
+  OR: [{ vendorId: null }, { vendor: { status: 'ACTIVE' } }],
 }
 
 export async function logAudit(

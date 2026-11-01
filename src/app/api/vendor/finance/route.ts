@@ -1,16 +1,16 @@
 import { db } from '@/lib/db'
-import { ok, handleError, requireVendor, round2 } from '@/lib/api'
+import { ok, handleError, requireVendorPermission, round2 } from '@/lib/api'
 
-// ---------------- GET: vendor finance (balance, ledger, settlements) ----------------
+// ---------------- GET: vendor finance (balance, ledger, settlements — owner or ACCOUNTANT) ----------------
 export async function GET() {
   try {
-    const { vendor } = await requireVendor()
+    const { vendor } = await requireVendorPermission('finance', { readOnly: true })
     const vendorId = vendor.id
 
     const [unsettledGroups, earningAgg, commissionAgg, settlements, ledger] = await Promise.all([
       db.vendorLedger.groupBy({ by: ['direction'], where: { vendorId, settled: false }, _sum: { amount: true } }),
       db.subOrder.aggregate({
-        where: { vendorId, status: { not: 'CANCELLED' } },
+        where: { vendorId, status: { notIn: ['CANCELLED', 'PENDING_PAYMENT'] } },
         _sum: { vendorEarning: true },
       }),
       db.vendorLedger.aggregate({

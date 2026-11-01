@@ -23,6 +23,7 @@ type WishProduct = {
   freeShipping: boolean
   vendor: { name: string; slug: string } | null
   brand: { name: string; slug: string } | null
+  _count?: { variants: number }
 }
 
 type WishItem = { id: string; product: WishProduct }
@@ -33,6 +34,8 @@ export default function WishlistView() {
   const navigate = useAppStore((s) => s.navigate)
   const params = useAppStore((s) => s.params)
   const refreshCartCount = useAppStore((s) => s.refreshCartCount)
+  const wishlistIds = useAppStore((s) => s.wishlistIds)
+  const setWishlistIds = useAppStore((s) => s.setWishlistIds)
 
   const [items, setItems] = useState<WishItem[] | null>(null)
   const [error, setError] = useState<string | null>(null)
@@ -63,6 +66,11 @@ export default function WishlistView() {
   }, [user, load])
 
   const addToCart = async (p: WishProduct) => {
+    if ((p._count?.variants ?? 0) > 0) {
+      toast.info('Please choose an option first')
+      navigate('product', { slug: p.slug })
+      return
+    }
     setAddingId(p.id)
     const res = await api('/api/cart/items', {
       method: 'POST',
@@ -70,6 +78,11 @@ export default function WishlistView() {
     })
     setAddingId(null)
     if (!res.ok) {
+      if ((res.error ?? '').toLowerCase().includes('variant')) {
+        toast.info('Please choose an option first')
+        navigate('product', { slug: p.slug })
+        return
+      }
       toast.error(res.error ?? 'Could not add to cart')
       return
     }
@@ -79,13 +92,16 @@ export default function WishlistView() {
 
   const removeFromWishlist = async (p: WishProduct) => {
     setRemovingId(p.id)
-    const res = await api(`/api/wishlist/${p.id}`, { method: 'DELETE' })
+    const res = await api<{ removed: boolean }>(`/api/wishlist/${encodeURIComponent(p.id)}`, {
+      method: 'DELETE',
+    })
     setRemovingId(null)
     if (!res.ok) {
       toast.error(res.error ?? 'Could not remove item')
       return
     }
     setItems((prev) => prev?.filter((i) => i.product.id !== p.id) ?? prev)
+    setWishlistIds(wishlistIds.filter((id) => id !== p.id))
     toast.success('Removed from wishlist')
   }
 

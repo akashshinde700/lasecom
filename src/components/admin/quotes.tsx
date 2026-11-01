@@ -117,7 +117,14 @@ export function AdminQuotesSection() {
           <h2 className="text-lg font-bold text-stone-900">Quotes & B2B Inquiries</h2>
           <p className="text-xs text-stone-400">{total} request(s) — respond within 24 hrs SLA</p>
         </div>
-        <Button variant="outline" size="sm" onClick={() => reloadWith(() => {})}>
+        <Button
+          variant="outline"
+          size="sm"
+          onClick={() => {
+            setItems(null)
+            load()
+          }}
+        >
           <RefreshCcw className="mr-1.5 h-3.5 w-3.5" /> Refresh
         </Button>
       </div>

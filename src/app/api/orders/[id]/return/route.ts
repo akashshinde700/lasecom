@@ -1,14 +1,13 @@
 import { NextRequest } from 'next/server'
 import { db } from '@/lib/db'
-import { ok, handleError, HttpError, requireUser } from '@/lib/api'
-import { notify } from '@/lib/api'
+import { ok, handleError, HttpError, requireUser, notify } from '@/lib/api'
 
 type ReturnBody = { orderItemId?: string; reason?: string; comment?: string }
 
 /**
  * POST /api/orders/:id/return — body { orderItemId, reason, comment? }
- * Only DELIVERED items, within 7 days of the DELIVERED ShipmentEvent.
- * Creates ReturnRequest (PENDING) and marks the item RETURN_REQUESTED.
+ * Only DELIVERED items, within `returns.windowDays` (default 7) days of the
+ * DELIVERED ShipmentEvent. Creates ReturnRequest (PENDING) and marks the item RETURN_REQUESTED.
  */
 export async function POST(req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
   try {
@@ -49,14 +48,18 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
       throw new HttpError('This item can no longer be returned', 409)
     }
 
+    const windowSetting = await db.setting.findUnique({ where: { key: 'returns.windowDays' } })
+    const parsedWindow = parseInt(windowSetting?.value ?? '7', 10)
+    const windowDays = Number.isFinite(parsedWindow) && parsedWindow > 0 ? parsedWindow : 7
+
     const deliveredEvent = await db.shipmentEvent.findFirst({
       where: { subOrderId: sub.id, status: 'DELIVERED' },
       orderBy: { createdAt: 'desc' },
     })
     if (!deliveredEvent) throw new HttpError('Delivery record not found for this item', 409)
     const daysSinceDelivery = (Date.now() - deliveredEvent.createdAt.getTime()) / 86400000
-    if (daysSinceDelivery > 7) {
-      throw new HttpError('The 7-day return window for this item has expired', 409)
+    if (daysSinceDelivery > windowDays) {
+      throw new HttpError(`The ${windowDays}-day return window for this item has expired`, 409)
     }
 
     const existingRequest = await db.returnRequest.findUnique({ where: { orderItemId } })

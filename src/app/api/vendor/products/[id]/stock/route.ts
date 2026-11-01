@@ -1,6 +1,6 @@
 import type { NextRequest } from 'next/server'
 import { db } from '@/lib/db'
-import { ok, handleError, HttpError, requireVendor, logAudit } from '@/lib/api'
+import { ok, handleError, HttpError, requireVendorPermission, logAudit } from '@/lib/api'
 
 type Params = { params: Promise<{ id: string }> }
 
@@ -9,7 +9,7 @@ const ALLOWED_REASONS = ['ORDER', 'CANCEL_RESTOCK', 'MANUAL_ADJUST', 'RETURN_RES
 // ---------------- POST: stock adjustment (clamped >= 0) ----------------
 export async function POST(req: NextRequest, { params }: Params) {
   try {
-    const { user, vendor } = await requireVendor()
+    const { user, vendor } = await requireVendorPermission('inventory', { allowPending: true })
     const { id } = await params
     const product = await db.product.findUnique({ where: { id } })
     if (!product || product.vendorId !== vendor.id) throw new HttpError('Product not found', 404)

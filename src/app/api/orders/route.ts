@@ -1,7 +1,7 @@
 import { NextRequest } from 'next/server'
 import { Prisma } from '@prisma/client'
 import { db } from '@/lib/db'
-import { getSessionUser } from '@/lib/auth'
+import { getSessionUser, grantGuestOrderAccess } from '@/lib/auth'
 import { ok, fail, handleError, HttpError, requireUser, round2 } from '@/lib/api'
 import { parseJson } from '@/lib/format'
 
@@ -34,8 +34,13 @@ type CheckoutBody = {
 const orderProductInclude = {
   category: { select: { commissionPercent: true } },
   vendor: {
-    select: { commissionPercent: true, plan: { select: { commissionDiscountPercent: true } } },
+    select: {
+      status: true,
+      commissionPercent: true,
+      plan: { select: { commissionDiscountPercent: true } },
+    },
   },
+  _count: { select: { variants: true } },
 } satisfies Prisma.ProductInclude
 
 type ProductForOrder = Prisma.ProductGetPayload<{ include: typeof orderProductInclude }>
@@ -79,19 +84,40 @@ function couponDiscountFor(coupon: CouponLike, itemsTotal: number): number {
 async function findCouponTx(
   tx: Prisma.TransactionClient,
   code: string
-): Promise<{ id: string; code: string; type: string; value: number; maxDiscount: number | null; minOrder: number; expiresAt: Date | null; usageLimit: number | null; usedCount: number; active: boolean } | null> {
-  const candidates = await tx.coupon.findMany({ where: { code: { contains: code } }, take: 25 })
+): Promise<{
+  id: string
+  code: string
+  type: string
+  value: number
+  maxDiscount: number | null
+  minOrder: number
+  expiresAt: Date | null
+  usageLimit: number | null
+  usedCount: number
+  active: boolean
+} | null> {
+  const exact = await tx.coupon.findUnique({ where: { code } })
+  if (exact) return exact
+  const candidates = await tx.coupon.findMany({ where: { code: { contains: code } } })
   return candidates.find((c) => c.code.toUpperCase() === code) ?? null
 }
 
-/** Fetch product + variant, validate ACTIVE status, atomically decrement stock. */
+/** Fetch product + variant, validate ACTIVE product & vendor status, enforce variant choice, and atomically decrement stock. */
 async function buildLine(tx: Prisma.TransactionClient, item: OrderInputItem): Promise<LineData> {
   const product = await tx.product.findUnique({
     where: { id: item.productId },
     include: orderProductInclude,
   })
-  if (!product || product.status !== 'ACTIVE') {
-    throw new HttpError('Some items in your cart are out of stock', 409)
+  if (
+    !product ||
+    product.status !== 'ACTIVE' ||
+    (product.vendorId != null && product.vendor?.status !== 'ACTIVE')
+  ) {
+    throw new HttpError('Some items in your cart are no longer available', 409)
+  }
+
+  if (product._count.variants > 0 && !item.variantId) {
+    throw new HttpError(`Please select a variant option for "${product.title}"`, 400)
   }
 
   let variant: { id: string; name: string; price: number | null } | null = null
@@ -159,7 +185,7 @@ export async function POST(req: NextRequest) {
       return fail('Complete shipping address is required', 400)
     }
 
-    let inputItems: OrderInputItem[] = []
+    const inputItems: OrderInputItem[] = []
     let usedBodyItems = false
     if (Array.isArray(body.items) && body.items.length > 0) {
       usedBodyItems = true
@@ -188,6 +214,9 @@ export async function POST(req: NextRequest) {
       //    order untouched (no stock decrement, no duplicate rows).
       const existing = await tx.order.findUnique({ where: { idempotencyKey } })
       if (existing) {
+        if (existing.userId && existing.userId !== user?.id) {
+          throw new HttpError('Idempotency key conflict', 409)
+        }
         const payment = await tx.payment.findFirst({
           where: { orderId: existing.id },
           orderBy: { createdAt: 'desc' },
@@ -201,13 +230,41 @@ export async function POST(req: NextRequest) {
         }
       }
 
-      // 1. Build the item list (body items or the user's server cart).
+      // 1. Settings: shipping + platform commission + COD availability.
+      const settingRows = await tx.setting.findMany({
+        where: {
+          key: {
+            in: [
+              'shipping.freeThreshold',
+              'shipping.baseFee',
+              'shipping.codFee',
+              'platform.commissionPercent',
+              'cod.enabled',
+            ],
+          },
+        },
+      })
+      const settingsMap: Record<string, string> = {}
+      for (const r of settingRows) settingsMap[r.key] = r.value
+      if (paymentMethod === 'COD' && settingsMap['cod.enabled'] === 'false') {
+        throw new HttpError('Cash on Delivery is currently disabled', 400)
+      }
+      const ft = parseFloat(settingsMap['shipping.freeThreshold'] ?? '499')
+      const freeThreshold = isNaN(ft) ? 499 : ft
+      const bf = parseFloat(settingsMap['shipping.baseFee'] ?? '49')
+      const baseFee = isNaN(bf) ? 49 : bf
+      const cf = parseFloat(settingsMap['shipping.codFee'] ?? '25')
+      const codFee = isNaN(cf) ? 25 : cf
+      const pc = parseFloat(settingsMap['platform.commissionPercent'] ?? '10')
+      const platformRate = isNaN(pc) ? 10 : pc
+
+      // 2. Build the item list (body items or the user's server cart).
       let couponCodeInput =
         typeof body.couponCode === 'string' && body.couponCode.trim()
           ? body.couponCode.trim().toUpperCase()
           : null
 
-      let lines: LineData[] = []
+      const lines: LineData[] = []
       let serverCartId: string | null = null
 
       if (usedBodyItems) {
@@ -233,39 +290,31 @@ export async function POST(req: NextRequest) {
       const itemsTotal = round2(lines.reduce((s, l) => s + l.lineTotal, 0))
       if (lines.length === 0 || itemsTotal <= 0) throw new HttpError('No items to order', 400)
 
-      // 2. Coupon validation + discount.
+      // 3. Coupon validation + atomic usage reservation.
       let couponDiscount = 0
-      let appliedCouponId: string | null = null
       if (couponCodeInput) {
         const coupon = await findCouponTx(tx, couponCodeInput)
         if (!coupon || !coupon.active) throw new HttpError('Invalid coupon code', 400)
         if (coupon.expiresAt && coupon.expiresAt < new Date()) {
           throw new HttpError('This coupon has expired', 400)
         }
-        if (coupon.usageLimit != null && coupon.usedCount >= coupon.usageLimit) {
-          throw new HttpError('This coupon has reached its usage limit', 400)
-        }
         if (itemsTotal < coupon.minOrder) {
           throw new HttpError(`This coupon requires a minimum order of ₹${coupon.minOrder}`, 400)
         }
+        const reserved = await tx.coupon.updateMany({
+          where: {
+            id: coupon.id,
+            active: true,
+            ...(coupon.usageLimit != null ? { usedCount: { lt: coupon.usageLimit } } : {}),
+          },
+          data: { usedCount: { increment: 1 } },
+        })
+        if (reserved.count === 0) {
+          throw new HttpError('This coupon has reached its usage limit', 400)
+        }
         couponDiscount = couponDiscountFor(coupon, itemsTotal)
-        appliedCouponId = coupon.id
+        couponCodeInput = coupon.code
       }
-
-      // 3. Settings: shipping + platform commission.
-      const settingRows = await tx.setting.findMany({
-        where: { key: { in: ['shipping.freeThreshold', 'shipping.baseFee', 'shipping.codFee', 'platform.commissionPercent'] } },
-      })
-      const settingsMap: Record<string, string> = {}
-      for (const r of settingRows) settingsMap[r.key] = r.value
-      const ft = parseFloat(settingsMap['shipping.freeThreshold'] ?? '499')
-      const freeThreshold = isNaN(ft) ? 499 : ft
-      const bf = parseFloat(settingsMap['shipping.baseFee'] ?? '49')
-      const baseFee = isNaN(bf) ? 49 : bf
-      const cf = parseFloat(settingsMap['shipping.codFee'] ?? '25')
-      const codFee = isNaN(cf) ? 25 : cf
-      const pc = parseFloat(settingsMap['platform.commissionPercent'] ?? '10')
-      const platformRate = isNaN(pc) ? 10 : pc
 
       // 4. Shipping per vendor group.
       const groupMap = new Map<string, { vendorId: string | null; lines: LineData[]; subtotal: number }>()
@@ -282,8 +331,6 @@ export async function POST(req: NextRequest) {
         return { ...g, shippingFee }
       })
       const shippingTotal = round2(groups.reduce((s, g) => s + g.shippingFee, 0))
-      // COD handling fee is part of the confirmed total (CheckoutView shows the
-      // same line) — must be added server-side or COD orders are created short.
       const grandTotal = round2(
         itemsTotal - couponDiscount + shippingTotal + (paymentMethod === 'COD' ? codFee : 0)
       )
@@ -333,6 +380,8 @@ export async function POST(req: NextRequest) {
       })
 
       // 6. SubOrders per vendor group + OrderItems with full snapshots.
+      // Online orders start in PENDING_PAYMENT so vendors cannot ship unpaid orders;
+      // markOrderPaid transitions them to CONFIRMED once payment succeeds.
       for (const g of groups) {
         const computed = g.lines.map((l) => {
           const discountShare = couponDiscount > 0 ? round2((couponDiscount * l.lineTotal) / itemsTotal) : 0
@@ -350,7 +399,7 @@ export async function POST(req: NextRequest) {
           data: {
             orderId: order.id,
             vendorId: g.vendorId,
-            status: 'CONFIRMED',
+            status: isCOD ? 'CONFIRMED' : 'PENDING_PAYMENT',
             itemsTotal: g.subtotal,
             shippingFee: g.shippingFee,
             commissionTotal,
@@ -409,12 +458,7 @@ export async function POST(req: NextRequest) {
         },
       })
 
-      // 8. Coupon usage.
-      if (appliedCouponId) {
-        await tx.coupon.update({ where: { id: appliedCouponId }, data: { usedCount: { increment: 1 } } })
-      }
-
-      // 9. The consumed server cart is cleared.
+      // 8. The consumed server cart is cleared.
       if (serverCartId) {
         await tx.cartItem.deleteMany({ where: { cartId: serverCartId } })
         await tx.cart.update({ where: { id: serverCartId }, data: { couponCode: null } })
@@ -429,6 +473,10 @@ export async function POST(req: NextRequest) {
       }
     })
 
+    if (!user) {
+      await grantGuestOrderAccess(result.orderId)
+    }
+
     return ok(result)
   } catch (err) {
     return handleError(err)
@@ -436,7 +484,7 @@ export async function POST(req: NextRequest) {
 }
 
 // ---------------------------------------------------------------------------
-// GET /api/orders — customer's own order list (paginated)
+// GET /api/orders — customer's own order list (paginated, filterable)
 // ---------------------------------------------------------------------------
 
 export async function GET(req: NextRequest) {
@@ -446,8 +494,18 @@ export async function GET(req: NextRequest) {
     const page = Math.max(1, parseInt(sp.get('page') || '1') || 1)
     const limit = Math.min(50, Math.max(1, parseInt(sp.get('limit') || '10') || 10))
     const skip = (page - 1) * limit
+    const statusParam = sp.get('status')?.trim().toLowerCase() || ''
 
     const where: Prisma.OrderWhereInput = { userId: user.id }
+    if (statusParam === 'active') {
+      where.status = { in: ['PENDING_PAYMENT', 'CONFIRMED', 'PARTIALLY_SHIPPED', 'SHIPPED'] }
+    } else if (statusParam === 'delivered') {
+      where.status = { in: ['DELIVERED', 'COMPLETED'] }
+    } else if (statusParam === 'cancelled') {
+      where.status = 'CANCELLED'
+    } else if (statusParam && statusParam !== 'all') {
+      where.status = statusParam.toUpperCase()
+    }
 
     const [orders, total] = await Promise.all([
       db.order.findMany({

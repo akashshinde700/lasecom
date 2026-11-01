@@ -119,6 +119,14 @@ export default function AccountView() {
     if (user) loadQuotes()
   }, [user, loadQuotes])
 
+  useEffect(() => {
+    if (!user || params.section !== 'quotes') return
+    const t = setTimeout(() => {
+      document.getElementById('my-quotes')?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+    }, 80)
+    return () => clearTimeout(t)
+  }, [user, params.section])
+
   const saveAddress = async () => {
     if (!form.fullName.trim() || !form.phone.trim() || !form.line1.trim() || !form.city.trim() || !form.state || !form.pincode.trim()) {
       toast.error('Please fill all address fields (except landmark)')

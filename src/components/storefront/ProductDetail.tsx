@@ -226,7 +226,7 @@ function DetailInner({ slug }: { slug: string }) {
       return
     }
     setSubmitting(true)
-    const r = await api(`/api/products/${product.id}/reviews`, {
+    const r = await api(`/api/products/${encodeURIComponent(product.slug)}`, {
       method: 'POST',
       json: { rating: revRating, title: revTitle.trim() || undefined, comment: revComment.trim() },
     })

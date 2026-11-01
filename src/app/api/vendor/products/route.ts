@@ -2,7 +2,7 @@ import { randomBytes } from 'crypto'
 import type { NextRequest } from 'next/server'
 import type { Prisma } from '@prisma/client'
 import { db } from '@/lib/db'
-import { ok, handleError, HttpError, requireVendor, round2, parsePage, logAudit } from '@/lib/api'
+import { ok, handleError, HttpError, requireVendor, requireVendorPermission, round2, parsePage, logAudit } from '@/lib/api'
 
 function slugify(s: string): string {
   return (
@@ -110,7 +110,7 @@ export async function GET(req: NextRequest) {
 // ---------------- POST: create vendor product ----------------
 export async function POST(req: NextRequest) {
   try {
-    const { user, vendor } = await requireVendor()
+    const { user, vendor } = await requireVendorPermission('products', { allowPending: true })
     const body = (await req.json().catch(() => ({}))) as Record<string, unknown>
 
     const title = typeof body.title === 'string' ? body.title.trim() : ''

@@ -24,10 +24,26 @@ export async function POST(req: NextRequest) {
 
     const product = await db.product.findUnique({
       where: { id: productId },
-      select: { id: true, status: true, stock: true },
+      select: {
+        id: true,
+        title: true,
+        status: true,
+        stock: true,
+        vendorId: true,
+        vendor: { select: { status: true } },
+        _count: { select: { variants: true } },
+      },
     })
-    if (!product || product.status !== 'ACTIVE') {
+    if (
+      !product ||
+      product.status !== 'ACTIVE' ||
+      (product.vendorId != null && product.vendor?.status !== 'ACTIVE')
+    ) {
       throw new HttpError('This product is not available', 404)
+    }
+
+    if (product._count.variants > 0 && !variantId) {
+      throw new HttpError('Please select a variant option on the product page', 400)
     }
 
     let availableStock = product.stock
@@ -37,7 +53,7 @@ export async function POST(req: NextRequest) {
         select: { id: true, stock: true },
       })
       if (!variant) throw new HttpError('Invalid product variant')
-      availableStock = variant.stock
+      availableStock = Math.min(product.stock, variant.stock)
     }
 
     const cartId = await getOrCreateCartId(user.id)

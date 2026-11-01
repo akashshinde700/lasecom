@@ -338,12 +338,13 @@ function ListingInner({
     if (min !== null) qs.set('min', String(min))
     if (max !== null) qs.set('max', String(max))
     if (rating !== null) qs.set('rating', String(rating))
+    if (inStock) qs.set('inStock', 'true')
     if (sponsored0) qs.set('sponsored', 'true')
     qs.set('sort', sort)
     qs.set('page', String(page))
     qs.set('limit', String(PAGE_SIZE))
     return qs.toString()
-  }, [search, category, brand, badge, condition, vendor, min, max, rating, sponsored0, sort, page])
+  }, [search, category, brand, badge, condition, vendor, min, max, rating, inStock, sponsored0, sort, page])
 
   const [loadedQuery, setLoadedQuery] = useState<string | null>(null)
   const loading = query !== loadedQuery

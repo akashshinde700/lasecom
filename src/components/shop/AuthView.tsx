@@ -15,8 +15,8 @@ import { Eye, EyeOff, Loader2, ShoppingBag } from 'lucide-react'
 
 const VALID_VIEWS: ViewName[] = [
   'home', 'listing', 'product', 'vendor', 'cart', 'checkout', 'order-success',
-  'orders', 'order-detail', 'wishlist', 'account', 'auth', 'notifications',
-  'static', 'vendor-panel', 'admin-panel',
+  'orders', 'order-detail', 'wishlist', 'account', 'notifications',
+  'static', 'quote', 'b2b', 'ewaste', 'vendor-panel', 'admin-panel',
 ]
 
 function PasswordInput({
@@ -66,10 +66,12 @@ export default function AuthView() {
 
   // Links open a specific tab via `#/auth?tab=register|vendor` ("vendor" is the Sell tab)
   const tabFromParams = (t?: string) => (t === 'register' ? 'register' : t === 'vendor' || t === 'sell' ? 'sell' : 'login')
+  const [prevParamTab, setPrevParamTab] = useState(params.tab)
   const [tab, setTab] = useState(() => tabFromParams(params.tab))
-  useEffect(() => {
+  if (params.tab !== prevParamTab) {
+    setPrevParamTab(params.tab)
     setTab(tabFromParams(params.tab))
-  }, [params.tab])
+  }
   const [busy, setBusy] = useState(false)
 
   // login
@@ -92,8 +94,12 @@ export default function AuthView() {
 
   const routeAfterAuth = (role: string) => {
     const r = params.redirect
-    if (r && VALID_VIEWS.includes(r as ViewName) && r !== 'auth') {
-      navigate(r as ViewName)
+    if (r && VALID_VIEWS.includes(r as ViewName)) {
+      const nextParams: Record<string, string | undefined> = {}
+      if (params.id) nextParams.id = params.id
+      if (params.slug) nextParams.slug = params.slug
+      if (params.section) nextParams.section = params.section
+      navigate(r as ViewName, nextParams)
       return
     }
     if (role === 'VENDOR_ADMIN' || role === 'VENDOR_STAFF') navigate('vendor-panel')

@@ -34,8 +34,9 @@ import { cn } from '@/lib/utils'
 
 export function csvExport(filename: string, columns: string[], rows: (string | number)[][]) {
   const esc = (v: string | number) => {
-    const s = String(v ?? '')
-    return /[",\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s
+    const raw = String(v ?? '')
+    const safe = typeof v === 'string' && /^[=+\-@\t\r]/.test(raw) ? `'${raw}` : raw
+    return /[",\n\r]/.test(safe) ? '"' + safe.replace(/"/g, '""') + '"' : safe
   }
   const lines = [columns.map(esc).join(','), ...rows.map((r) => r.map(esc).join(','))]
   const blob = new Blob(['\ufeff' + lines.join('\n')], { type: 'text/csv;charset=utf-8;' })
