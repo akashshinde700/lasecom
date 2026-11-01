@@ -1,11 +1,12 @@
 import { NextRequest } from 'next/server'
 import { db } from '@/lib/db'
-import { ok, handleError, HttpError } from '@/lib/api'
+import { ok, handleError, HttpError, canAccessOrder } from '@/lib/api'
 import { getSessionUser } from '@/lib/auth'
 import { parseJson } from '@/lib/format'
 
 /**
- * GET /api/orders/:id — owner (session) or guest with ?email= matching guestEmail.
+ * GET /api/orders/:id — owner (session), guest with signed `sk_guest_orders`
+ * cookie, or guest with ?email= matching guestEmail.
  */
 export async function GET(req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
   try {
@@ -32,10 +33,7 @@ export async function GET(req: NextRequest, { params }: { params: Promise<{ id: 
     })
     if (!order) throw new HttpError('Order not found', 404)
 
-    const isOwner = !!user && order.userId === user.id
-    const isGuestMatch =
-      !order.userId && !!emailParam && !!order.guestEmail && emailParam.toLowerCase() === order.guestEmail.toLowerCase()
-    if (!isOwner && !isGuestMatch) {
+    if (!(await canAccessOrder(order, user, { emailParam, allowEmailFallback: true }))) {
       throw new HttpError('You are not authorized to view this order', 403)
     }
 

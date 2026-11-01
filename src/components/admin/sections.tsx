@@ -1296,10 +1296,29 @@ export function AdminProductsSection({ isOwner }: { isOwner: boolean }) {
                             <MoreHorizontal className="size-4" />
                           </Button>
                         </DropdownMenuTrigger>
-                        <DropdownMenuContent align="end" className="w-44">
+                        <DropdownMenuContent align="end" className="w-48">
                           <DropdownMenuItem onSelect={() => setPriceDlg({ id: p.id, title: p.title, price: String(p.price), mrp: String(p.mrp), stock: String(p.stock) })}>
                             <IndianRupee className="size-4" /> Edit price / stock
                           </DropdownMenuItem>
+                          {p.status === 'PENDING_REVIEW' || p.status === 'REJECTED' ? (
+                            <>
+                              <DropdownMenuSeparator />
+                              <DropdownMenuItem
+                                className="text-emerald-700 focus:bg-emerald-50 focus:text-emerald-700"
+                                onSelect={() => patchProduct(p.id, { status: 'ACTIVE' }, 'Product approved & live')}
+                              >
+                                <BadgeCheck className="size-4" /> Approve listing
+                              </DropdownMenuItem>
+                            </>
+                          ) : null}
+                          {p.status === 'PENDING_REVIEW' ? (
+                            <DropdownMenuItem
+                              className="text-amber-700 focus:bg-amber-50 focus:text-amber-700"
+                              onSelect={() => patchProduct(p.id, { status: 'REJECTED' }, 'Product rejected')}
+                            >
+                              <Ban className="size-4" /> Reject listing
+                            </DropdownMenuItem>
+                          ) : null}
                           <DropdownMenuSeparator />
                           {p.status !== 'ARCHIVED' ? (
                             <DropdownMenuItem className="text-red-600 focus:text-red-600 focus:bg-red-50" onSelect={() => setArchiveDlg(p)}>
@@ -1852,7 +1871,11 @@ export function ReturnsSection() {
         toast.success(action === 'APPROVED' ? 'Return approved — refund initiated' : 'Return rejected')
         setApproveDlg(null)
         setRejectDlg(null)
-        setItems((prev) => prev.filter((r) => r.id !== rr.id))
+        setItems((prev) =>
+          statusFilter === 'PENDING'
+            ? prev.filter((r) => r.id !== rr.id)
+            : prev.map((r) => (r.id === rr.id ? { ...r, status: action } : r))
+        )
       } else {
         toast.error(res.error ?? 'Failed to resolve return')
       }

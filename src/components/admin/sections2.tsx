@@ -1051,7 +1051,6 @@ export function BannersSection() {
               <ImageUploadButton label="Upload banner" onUploaded={(urls) => setImageUrl(urls[0])} />
               <Input value={imageUrl} onChange={(e) => setImageUrl(e.target.value)} placeholder="…or paste an image URL" className="font-mono text-xs" />
               {imageUrl ? (
-                // eslint-disable-next-line @next/next/no-img-element
                 <img src={imageUrl} alt="Banner preview" className="h-20 w-full rounded-md border border-stone-200 object-cover" />
               ) : null}
             </div>

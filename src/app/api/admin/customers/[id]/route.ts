@@ -17,7 +17,12 @@ export async function POST(req: NextRequest, { params }: Params) {
     if (!target) throw new HttpError('Customer not found', 404)
     if (target.role !== 'CUSTOMER') throw new HttpError('Only customer accounts can be toggled', 400)
 
-    await db.user.update({ where: { id }, data: { status } })
+    await db.$transaction(async (tx) => {
+      await tx.user.update({ where: { id }, data: { status } })
+      if (status === 'BLOCKED') {
+        await tx.session.deleteMany({ where: { userId: id } })
+      }
+    })
     await logAudit(user, `customer.${status === 'BLOCKED' ? 'block' : 'unblock'}`, 'User', id, target.email)
     return ok({ id, status })
   } catch (err) {

@@ -87,6 +87,8 @@ const INDIAN_STATES = [
 export default function CheckoutView() {
   const user = useAppStore((s) => s.user)
   const guestCart = useAppStore((s) => s.guestCart)
+  const guestCouponCode = useAppStore((s) => s.guestCouponCode)
+  const setGuestCouponCode = useAppStore((s) => s.setGuestCouponCode)
   const settings = useAppStore((s) => s.settings)
   const navigate = useAppStore((s) => s.navigate)
   const clearGuestCart = useAppStore((s) => s.clearGuestCart)
@@ -120,6 +122,8 @@ export default function CheckoutView() {
   const threshold = settings?.freeShipThreshold ?? 499
   const baseFee = settings?.baseShipFee ?? 49
   const codFee = settings?.codFee ?? 25
+  const codEnabled = settings?.codEnabled !== false
+  const effectivePaymentMethod = !codEnabled && paymentMethod === 'COD' ? 'RAZORPAY' : paymentMethod
 
   /* Guest cart is derived directly from the persisted store — no fetch needed. */
   const guestItems = useMemo<UnifiedCartItem[]>(
@@ -209,6 +213,27 @@ export default function CheckoutView() {
 
   const itemsTotal = useMemo(() => (items ?? []).reduce((s, i) => s + i.price * i.qty, 0), [items])
 
+  // Validate persisted guest coupon on checkout load
+  useEffect(() => {
+    if (user || !guestCouponCode || itemsTotal <= 0) return
+    let cancelled = false
+    api<{ code: string; discount: number; description: string | null }>('/api/coupons/validate', {
+      method: 'POST',
+      json: { code: guestCouponCode, itemsTotal },
+    }).then((v) => {
+      if (cancelled) return
+      if (v.ok && v.data) {
+        setCoupon({ code: v.data.code, discount: v.data.discount, description: v.data.description })
+      } else {
+        setCoupon(null)
+        setGuestCouponCode(null)
+      }
+    })
+    return () => {
+      cancelled = true
+    }
+  }, [user, guestCouponCode, itemsTotal, setGuestCouponCode])
+
   const groups = useMemo(() => {
     const map = new Map<string, { vendorName: string; subtotal: number; anyFreeShipping: boolean; items: UnifiedCartItem[] }>()
     for (const i of items ?? []) {
@@ -223,7 +248,7 @@ export default function CheckoutView() {
 
   const shipping = useMemo(() => groupShippingFees(groups, threshold, baseFee), [groups, threshold, baseFee])
   const discount = coupon ? Math.min(coupon.discount, itemsTotal) : 0
-  const grandTotal = Math.max(0, itemsTotal - discount + shipping.total + (paymentMethod === 'COD' ? codFee : 0))
+  const grandTotal = Math.max(0, itemsTotal - discount + shipping.total + (effectivePaymentMethod === 'COD' ? codFee : 0))
 
   const saveAddress = async () => {
     if (!form.fullName.trim() || !form.phone.trim() || !form.line1.trim() || !form.city.trim() || !form.state || !form.pincode.trim()) {
@@ -333,7 +358,7 @@ export default function CheckoutView() {
     const payload: Record<string, unknown> = {
       idempotencyKey: crypto.randomUUID(),
       shippingAddress: addr,
-      paymentMethod,
+      paymentMethod: effectivePaymentMethod,
       ...(coupon ? { couponCode: coupon.code } : {}),
     }
     if (user) {
@@ -364,7 +389,7 @@ export default function CheckoutView() {
       return
     }
     setPlacing(false)
-    if (paymentMethod === 'RAZORPAY') {
+    if (effectivePaymentMethod === 'RAZORPAY') {
       setPay({ stage: 'processing', orderId, orderNumber })
       setTimeout(() => doRazorpayPay(orderId, orderNumber), 300)
     } else {
@@ -563,24 +588,26 @@ export default function CheckoutView() {
           <Card className="rounded-xl border shadow-sm">
             <CardContent className="p-5">
               <h2 className="mb-4 text-sm font-semibold text-stone-800">Payment method</h2>
-              <RadioGroup value={paymentMethod} onValueChange={(v) => setPaymentMethod(v as typeof paymentMethod)} className="gap-3">
+              <RadioGroup value={effectivePaymentMethod} onValueChange={(v) => setPaymentMethod(v as typeof paymentMethod)} className="gap-3">
                 {([
                   { id: 'RAZORPAY', icon: Wallet, desc: PAYMENT_BRAND.RAZORPAY, badge: 'Recommended' },
                   { id: 'UPI', icon: Smartphone, desc: PAYMENT_BRAND.UPI, badge: '' },
                   { id: 'CARD', icon: CreditCard, desc: PAYMENT_BRAND.CARD, badge: '' },
                   { id: 'NETBANKING', icon: Landmark, desc: PAYMENT_BRAND.NETBANKING, badge: '' },
-                  { id: 'COD', icon: Banknote, desc: `Pay in cash on delivery · +${formatINR(codFee)} handling fee`, badge: '' },
-                ] as const).map((m) => (
+                  ...(codEnabled
+                    ? [{ id: 'COD' as const, icon: Banknote, desc: `Pay in cash on delivery · +${formatINR(codFee)} handling fee`, badge: '' }]
+                    : []),
+                ]).map((m) => (
                   <Label
                     key={m.id}
                     htmlFor={`pay-${m.id}`}
                     className={cn(
                       'flex cursor-pointer items-center gap-3 rounded-lg border p-3.5 transition-colors',
-                      paymentMethod === m.id ? 'border-orange-600 bg-orange-50/60' : 'border-stone-200 hover:border-stone-300'
+                      effectivePaymentMethod === m.id ? 'border-orange-600 bg-orange-50/60' : 'border-stone-200 hover:border-stone-300'
                     )}
                   >
                     <RadioGroupItem value={m.id} id={`pay-${m.id}`} />
-                    <m.icon className={cn('h-5 w-5', paymentMethod === m.id ? 'text-orange-600' : 'text-stone-400')} />
+                    <m.icon className={cn('h-5 w-5', effectivePaymentMethod === m.id ? 'text-orange-600' : 'text-stone-400')} />
                     <div className="flex-1">
                       <p className="text-sm font-semibold text-stone-900">{PAYMENT_LABEL[m.id]}</p>
                       {m.desc ? <p className="text-xs text-stone-500">{m.desc}</p> : null}

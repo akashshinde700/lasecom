@@ -18,17 +18,20 @@ const productCardSelect = {
   sellerType: true,
   freeShipping: true,
   weightGrams: true,
+  condition: true,
+  refurbGrade: true,
   brand: { select: { name: true, slug: true } },
   category: { select: { name: true, slug: true } },
   vendor: { select: { name: true, slug: true } },
+  _count: { select: { variants: true } },
 } satisfies Prisma.ProductSelect
 
-export async function GET(req: NextRequest, { params }: { params: Promise<{ slug: string }> }) {
+export async function GET(_req: NextRequest, { params }: { params: Promise<{ slug: string }> }) {
   try {
     const { slug } = await params
 
-    const vendor = await db.vendor.findUnique({
-      where: { slug },
+    const vendor = await db.vendor.findFirst({
+      where: { slug, status: 'ACTIVE' },
       select: {
         id: true,
         name: true,

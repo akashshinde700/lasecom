@@ -1,12 +1,12 @@
 // ============================================================
 // Shared sub-order lifecycle logic (used by vendor + admin APIs)
 // - updateSubOrderStatus: forward-only flow transitions, cancel w/ restock+refund,
-//   auto tracking, shipment events, parent order rollup, customer notification
-// - resolveReturnRequest: approve (refund) / reject flows
+//   auto tracking, shipment events, COD delivery settlement, parent order rollup
+// - resolveReturnRequest: approve (restock + refund + ledger) / reject flows
 // ============================================================
 import { randomInt } from 'crypto'
 import { db } from '@/lib/db'
-import { HttpError, notify, logAudit, round2 } from '@/lib/api'
+import { HttpError, notify, logAudit, round2, reverseSubOrderLedgerTx } from '@/lib/api'
 import type { SessionUser } from '@/lib/auth'
 
 export const SUBORDER_FLOW = ['CONFIRMED', 'PROCESSING', 'PACKED', 'SHIPPED', 'DELIVERED']
@@ -62,8 +62,18 @@ export async function updateSubOrderStatus(
   if (opts.vendorId && subOrder.vendorId !== opts.vendorId) throw new HttpError('Sub-order not found', 404)
   if (subOrder.status === 'CANCELLED') throw new HttpError('This sub-order has already been cancelled', 400)
 
+  const isPendingPayment =
+    subOrder.status === 'PENDING_PAYMENT' ||
+    (subOrder.order.paymentMethod !== 'COD' && subOrder.order.paymentStatus === 'PENDING')
+
+  if (isPendingPayment && status !== 'CANCELLED') {
+    throw new HttpError('Cannot fulfil an order before payment is completed', 400)
+  }
+
   const curIdx = SUBORDER_FLOW.indexOf(subOrder.status)
-  if (curIdx < 0) throw new HttpError('Sub-order is in an invalid state', 400)
+  if (!isPendingPayment && curIdx < 0) {
+    throw new HttpError('Sub-order is in an invalid state', 400)
+  }
 
   if (status === 'CANCELLED') {
     if (curIdx >= SUBORDER_FLOW.indexOf('SHIPPED')) {
@@ -75,7 +85,9 @@ export async function updateSubOrderStatus(
     if (newIdx < curIdx) throw new HttpError('Status cannot move backwards', 400)
   }
 
-  const wasPaid = subOrder.order.paymentStatus === 'PAID'
+  const wasPaid =
+    subOrder.order.paymentStatus === 'PAID' || subOrder.order.paymentStatus === 'PARTIALLY_REFUNDED'
+  const isCOD = subOrder.order.paymentMethod === 'COD'
   let refundAmount = 0
 
   const updated = await db.$transaction(async (tx) => {
@@ -83,9 +95,21 @@ export async function updateSubOrderStatus(
       // restock live items + mark them cancelled
       for (const item of subOrder.items) {
         if (item.status === 'REFUNDED' || item.status === 'CANCELLED') continue
-        await tx.product.update({ where: { id: item.productId }, data: { stock: { increment: item.qty } } })
+        await tx.product.update({
+          where: { id: item.productId },
+          data: { stock: { increment: item.qty } },
+        })
+        if (wasPaid) {
+          await tx.product.updateMany({
+            where: { id: item.productId, soldCount: { gte: item.qty } },
+            data: { soldCount: { decrement: item.qty } },
+          })
+        }
         if (item.variantId) {
-          await tx.productVariant.update({ where: { id: item.variantId }, data: { stock: { increment: item.qty } } })
+          await tx.productVariant.update({
+            where: { id: item.variantId },
+            data: { stock: { increment: item.qty } },
+          })
         }
         await tx.stockMovement.create({
           data: {
@@ -100,37 +124,47 @@ export async function updateSubOrderStatus(
         await tx.orderItem.update({ where: { id: item.id }, data: { status: 'CANCELLED' } })
       }
 
-      // refund the customer's paid share of this sub-order (items after coupon share + shipping)
-      refundAmount = round2(
-        subOrder.items.filter((i) => i.status !== 'REFUNDED').reduce((s, i) => s + i.effectiveTotal, 0) +
-          subOrder.shippingFee
+      // refund the customer's paid share of this sub-order (active items after coupon share + shipping),
+      // capped by remaining unrefunded balance on the order.
+      const subShare = round2(
+        subOrder.items
+          .filter((i) => i.status !== 'REFUNDED' && i.status !== 'CANCELLED')
+          .reduce((s, i) => s + i.effectiveTotal, 0) + subOrder.shippingFee
       )
-      if (wasPaid && refundAmount > 0) {
-        const payment = await tx.payment.findFirst({ where: { orderId: subOrder.orderId, status: 'SUCCESS' } })
-        if (payment) {
-          await tx.refund.create({
-            data: {
-              paymentId: payment.id,
-              amount: refundAmount,
-              reason: `Sub-order cancelled (${subOrder.order.orderNumber})`,
-              status: 'SUCCESS',
-            },
+      if (wasPaid && subShare > 0) {
+        const payments = await tx.payment.findMany({
+          where: { orderId: subOrder.orderId, status: 'SUCCESS' },
+          orderBy: { createdAt: 'desc' },
+        })
+        if (payments.length > 0) {
+          const prevRefunds = await tx.refund.aggregate({
+            where: { paymentId: { in: payments.map((p) => p.id) } },
+            _sum: { amount: true },
           })
+          const alreadyRefunded = prevRefunds._sum.amount ?? 0
+          const remaining = round2(Math.max(0, subOrder.order.grandTotal - alreadyRefunded))
+          refundAmount = Math.min(subShare, remaining)
+          if (refundAmount > 0) {
+            await tx.refund.create({
+              data: {
+                paymentId: payments[0].id,
+                amount: refundAmount,
+                reason: `Sub-order cancelled (${subOrder.order.orderNumber})`,
+                status: 'SUCCESS',
+              },
+            })
+          }
         }
       }
 
-      // reverse the vendor's net earning in the ledger
-      if (subOrder.vendorId && wasPaid && subOrder.vendorEarning > 0) {
-        await tx.vendorLedger.create({
-          data: {
-            vendorId: subOrder.vendorId,
-            subOrderId: subOrder.id,
-            type: 'REFUND_DEBIT',
-            direction: 'DEBIT',
-            amount: round2(subOrder.vendorEarning),
-            notes: `Earning reversal — cancelled sub-order (${subOrder.order.orderNumber})`,
-          },
-        })
+      // reverse exact net vendor ledger credit (items net of commission + shipping - any prior debits)
+      if (subOrder.vendorId && wasPaid) {
+        await reverseSubOrderLedgerTx(
+          tx,
+          subOrder.vendorId,
+          subOrder.id,
+          `Earning reversal — cancelled sub-order (${subOrder.order.orderNumber})`
+        )
       }
     }
 
@@ -150,6 +184,65 @@ export async function updateSubOrderStatus(
             : STATUS_NOTE[status] ?? null,
       },
     })
+
+    // ---- COD settlement on delivery ----
+    if (status === 'DELIVERED' && isCOD) {
+      const activeItems = subOrder.items.filter((i) => i.status !== 'CANCELLED' && i.status !== 'REFUNDED')
+      for (const item of activeItems) {
+        await tx.product.update({
+          where: { id: item.productId },
+          data: { soldCount: { increment: item.qty } },
+        })
+      }
+      if (subOrder.vendorId) {
+        const existingSale = await tx.vendorLedger.findFirst({
+          where: { vendorId: subOrder.vendorId, subOrderId: subOrder.id, type: 'SALE_CREDIT' },
+          select: { id: true },
+        })
+        if (!existingSale) {
+          const effectiveItemsTotal = round2(
+            activeItems.reduce((sum, item) => sum + item.effectiveTotal, 0)
+          )
+          if (effectiveItemsTotal > 0) {
+            await tx.vendorLedger.create({
+              data: {
+                vendorId: subOrder.vendorId,
+                subOrderId: subOrder.id,
+                type: 'SALE_CREDIT',
+                direction: 'CREDIT',
+                amount: effectiveItemsTotal,
+                notes: `COD sale credit for order ${subOrder.order.orderNumber}`,
+              },
+            })
+          }
+          if (subOrder.commissionTotal > 0) {
+            await tx.vendorLedger.create({
+              data: {
+                vendorId: subOrder.vendorId,
+                subOrderId: subOrder.id,
+                type: 'COMMISSION_DEBIT',
+                direction: 'DEBIT',
+                amount: round2(subOrder.commissionTotal),
+                notes: `Platform commission for COD order ${subOrder.order.orderNumber}`,
+              },
+            })
+          }
+          if (subOrder.shippingFee > 0) {
+            await tx.vendorLedger.create({
+              data: {
+                vendorId: subOrder.vendorId,
+                subOrderId: subOrder.id,
+                type: 'SALE_CREDIT',
+                direction: 'CREDIT',
+                amount: round2(subOrder.shippingFee),
+                notes: `Shipping fee collected for COD order ${subOrder.order.orderNumber}`,
+              },
+            })
+          }
+        }
+      }
+    }
+
     return so
   })
 
@@ -161,18 +254,54 @@ export async function updateSubOrderStatus(
   else if (active.every((s) => s.status === 'DELIVERED')) orderStatus = 'DELIVERED'
   else if (active.every((s) => s.status === 'SHIPPED' || s.status === 'DELIVERED')) orderStatus = 'SHIPPED'
   else if (active.some((s) => s.status === 'SHIPPED' || s.status === 'DELIVERED')) orderStatus = 'PARTIALLY_SHIPPED'
+  else if (active.every((s) => s.status === 'PENDING_PAYMENT')) orderStatus = 'PENDING_PAYMENT'
   else orderStatus = 'CONFIRMED'
 
+  // Release coupon usage slot if the entire order is now cancelled
+  if (orderStatus === 'CANCELLED' && subOrder.order.couponCode) {
+    const candidates = await db.coupon.findMany({
+      where: { code: { contains: subOrder.order.couponCode } },
+    })
+    const matched = candidates.find(
+      (c) => c.code.toUpperCase() === subOrder.order.couponCode!.toUpperCase()
+    )
+    if (matched) {
+      await db.coupon.updateMany({
+        where: { id: matched.id, usedCount: { gt: 0 } },
+        data: { usedCount: { decrement: 1 } },
+      })
+    }
+  }
+
   let paymentStatus = subOrder.order.paymentStatus
-  if (wasPaid) {
-    const pays = await db.payment.findMany({ where: { orderId: subOrder.orderId, status: 'SUCCESS' }, select: { id: true } })
+  if (isCOD && orderStatus === 'DELIVERED' && paymentStatus === 'COD_PENDING') {
+    const codPayment = await db.payment.findFirst({
+      where: { orderId: subOrder.orderId, status: 'COD_PENDING' },
+      orderBy: { createdAt: 'desc' },
+    })
+    if (codPayment) {
+      await db.payment.update({
+        where: { id: codPayment.id },
+        data: { status: 'SUCCESS', gatewayRef: `cod_${subOrder.order.orderNumber}` },
+      })
+    }
+    paymentStatus = 'PAID'
+  } else if (wasPaid && status === 'CANCELLED') {
+    const pays = await db.payment.findMany({
+      where: { orderId: subOrder.orderId, status: 'SUCCESS' },
+      select: { id: true },
+    })
     if (pays.length > 0) {
       const agg = await db.refund.aggregate({
         where: { paymentId: { in: pays.map((p) => p.id) } },
         _sum: { amount: true },
       })
       const refunded = agg._sum.amount ?? 0
-      paymentStatus = refunded >= subOrder.order.grandTotal - 0.01 ? 'REFUNDED' : 'PARTIALLY_REFUNDED'
+      if (orderStatus === 'CANCELLED' || refunded >= subOrder.order.grandTotal - 0.01) {
+        paymentStatus = 'REFUNDED'
+      } else if (refunded > 0) {
+        paymentStatus = 'PARTIALLY_REFUNDED'
+      }
     }
   }
 
@@ -242,9 +371,11 @@ export type ReturnResolveResult = {
 
 /**
  * Resolve a return request. Pass opts.vendorId for vendor isolation.
- * APPROVED → REFUNDED: refund row on SUCCESS/COD payment, item REFUNDED, order paymentStatus
- * updated, vendor ledger REFUND_DEBIT (vendorEarning), subOrder.refundTotal incremented, shipment note.
- * REJECTED → item back to DELIVERED.
+ * APPROVED → REFUNDED: restocks inventory (+StockMovement RETURN_RESTOCK),
+ * creates refund row on SUCCESS/COD payment, marks item REFUNDED, updates order
+ * paymentStatus, writes vendor ledger REFUND_DEBIT (vendorEarning), increments
+ * subOrder.refundTotal, and records shipment note.
+ * REJECTED → marks item RETURN_REJECTED.
  */
 export async function resolveReturnRequest(
   returnRequestId: string,
@@ -276,7 +407,7 @@ export async function resolveReturnRequest(
         where: { id: rr.id },
         data: { status: 'REJECTED', resolvedAt: new Date() },
       })
-      await tx.orderItem.update({ where: { id: item.id }, data: { status: 'DELIVERED' } })
+      await tx.orderItem.update({ where: { id: item.id }, data: { status: 'RETURN_REJECTED' } })
     })
     if (order.userId) {
       await notify(
@@ -290,7 +421,7 @@ export async function resolveReturnRequest(
     return { id: rr.id, status: 'REJECTED' }
   }
 
-  // ---- APPROVED → refund flow ----
+  // ---- APPROVED → restock + refund flow ----
   const refundAmt = round2(item.effectiveTotal)
   await db.$transaction(async (tx) => {
     await tx.returnRequest.update({
@@ -298,6 +429,32 @@ export async function resolveReturnRequest(
       data: { status: 'REFUNDED', refundAmount: refundAmt, resolvedAt: new Date() },
     })
     await tx.orderItem.update({ where: { id: item.id }, data: { status: 'REFUNDED' } })
+
+    // Restock returned item inventory & decrement soldCount
+    await tx.product.update({
+      where: { id: item.productId },
+      data: { stock: { increment: item.qty } },
+    })
+    await tx.product.updateMany({
+      where: { id: item.productId, soldCount: { gte: item.qty } },
+      data: { soldCount: { decrement: item.qty } },
+    })
+    if (item.variantId) {
+      await tx.productVariant.update({
+        where: { id: item.variantId },
+        data: { stock: { increment: item.qty } },
+      })
+    }
+    await tx.stockMovement.create({
+      data: {
+        productId: item.productId,
+        variantId: item.variantId,
+        delta: item.qty,
+        reason: 'RETURN_RESTOCK',
+        refId: order.orderNumber,
+        actorName: opts.actor?.name ?? 'system',
+      },
+    })
 
     const payment = await tx.payment.findFirst({
       where: { orderId: order.id, status: { in: ['SUCCESS', 'COD_PENDING'] } },
@@ -320,23 +477,34 @@ export async function resolveReturnRequest(
       where: { subOrder: { orderId: order.id } },
       select: { status: true },
     })
-    const allResolved = orderItems.length > 0 && orderItems.every((i) => i.status === 'REFUNDED' || i.status === 'CANCELLED')
+    const allResolved =
+      orderItems.length > 0 && orderItems.every((i) => i.status === 'REFUNDED' || i.status === 'CANCELLED')
     await tx.order.update({
       where: { id: order.id },
       data: { paymentStatus: allResolved ? 'REFUNDED' : 'PARTIALLY_REFUNDED' },
     })
 
-    if (item.subOrder.vendorId) {
-      await tx.vendorLedger.create({
-        data: {
+    if (item.subOrder.vendorId && item.vendorEarning > 0) {
+      const hasSaleCredit = await tx.vendorLedger.findFirst({
+        where: {
           vendorId: item.subOrder.vendorId,
           subOrderId: item.subOrder.id,
-          type: 'REFUND_DEBIT',
-          direction: 'DEBIT',
-          amount: round2(item.vendorEarning),
-          notes: `Refund for return — ${order.orderNumber} (${item.titleSnapshot})`,
+          type: 'SALE_CREDIT',
         },
+        select: { id: true },
       })
+      if (hasSaleCredit) {
+        await tx.vendorLedger.create({
+          data: {
+            vendorId: item.subOrder.vendorId,
+            subOrderId: item.subOrder.id,
+            type: 'REFUND_DEBIT',
+            direction: 'DEBIT',
+            amount: round2(item.vendorEarning),
+            notes: `Refund for return — ${order.orderNumber} (${item.titleSnapshot})`,
+          },
+        })
+      }
     }
 
     await tx.subOrder.update({

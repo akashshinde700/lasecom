@@ -21,8 +21,12 @@ export async function POST(req: NextRequest) {
       throw new HttpError('itemsTotal must be a positive number')
     }
 
-    const candidates = await db.coupon.findMany({ where: { code: { contains: code } }, take: 25 })
-    const coupon = candidates.find((c) => c.code.toUpperCase() === code)
+    const exact = await db.coupon.findUnique({ where: { code } })
+    const coupon =
+      exact ??
+      (await db.coupon.findMany({ where: { code: { contains: code } } })).find(
+        (c) => c.code.toUpperCase() === code
+      )
     if (!coupon || !coupon.active) throw new HttpError('Invalid coupon code', 404)
     if (coupon.expiresAt && coupon.expiresAt < new Date()) {
       throw new HttpError('This coupon has expired')

@@ -26,9 +26,12 @@ export async function POST(req: NextRequest) {
       }))
     if (history.length === 0) throw new HttpError('Message is required', 400)
 
-    // Build a compact catalog snapshot for grounding
+    // Build a compact catalog snapshot for grounding (active 1P + approved active 3P vendors only)
     const products = await db.product.findMany({
-      where: { status: 'ACTIVE' },
+      where: {
+        status: 'ACTIVE',
+        OR: [{ vendorId: null }, { vendor: { status: 'ACTIVE' } }],
+      },
       orderBy: [{ soldCount: 'desc' }, { rating: 'desc' }],
       take: 40,
       select: {

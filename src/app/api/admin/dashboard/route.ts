@@ -8,7 +8,8 @@ export async function GET() {
     await requireAdmin()
     const now = new Date()
     const dayStart = startOfDay(subDays(now, 13))
-    const notCancelledSub = { status: { not: 'CANCELLED' } } as const
+    const notCancelledSub: { status: { notIn: string[] } } = { status: { notIn: ['CANCELLED', 'PENDING_PAYMENT'] } }
+    const confirmedOrderWhere: { status: { notIn: string[] } } = { status: { notIn: ['CANCELLED', 'PENDING_PAYMENT'] } }
 
     const [
       orderAgg,
@@ -33,13 +34,13 @@ export async function GET() {
       recentOrdersAll,
       activeVendors,
     ] = await Promise.all([
-      db.order.aggregate({ where: { status: { not: 'CANCELLED' } }, _sum: { grandTotal: true }, _count: true }),
+      db.order.aggregate({ where: confirmedOrderWhere, _sum: { grandTotal: true }, _count: true }),
       db.order.groupBy({ by: ['status'], _count: true }),
-      db.orderItem.aggregate({ where: { isPlatformOwned: true, subOrder: notCancelledSub }, _sum: { effectiveTotal: true } }),
-      db.orderItem.aggregate({ where: { isPlatformOwned: false, subOrder: notCancelledSub }, _sum: { effectiveTotal: true } }),
-      db.orderItem.aggregate({ where: { subOrder: notCancelledSub }, _sum: { commissionAmount: true } }),
+      db.orderItem.aggregate({ where: { isPlatformOwned: true, status: { not: 'CANCELLED' }, subOrder: notCancelledSub }, _sum: { effectiveTotal: true } }),
+      db.orderItem.aggregate({ where: { isPlatformOwned: false, status: { not: 'CANCELLED' }, subOrder: notCancelledSub }, _sum: { effectiveTotal: true } }),
+      db.orderItem.aggregate({ where: { status: { not: 'CANCELLED' }, subOrder: notCancelledSub }, _sum: { commissionAmount: true } }),
       db.orderItem.findMany({
-        where: { isPlatformOwned: true, subOrder: notCancelledSub, costSnapshot: { not: null } },
+        where: { isPlatformOwned: true, status: { not: 'CANCELLED' }, subOrder: notCancelledSub, costSnapshot: { not: null } },
         select: { effectiveTotal: true, costSnapshot: true },
       }),
       db.refund.aggregate({ _sum: { amount: true } }),
@@ -75,7 +76,7 @@ export async function GET() {
         take: 5,
       }),
       db.order.findMany({
-        where: { createdAt: { gte: dayStart }, status: { not: 'CANCELLED' } },
+        where: { createdAt: { gte: dayStart }, ...confirmedOrderWhere },
         select: { grandTotal: true, createdAt: true },
       }),
       db.order.findMany({

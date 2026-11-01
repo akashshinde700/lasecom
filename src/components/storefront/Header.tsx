@@ -126,12 +126,19 @@ function SearchBox({ id, autoFocus, onNavigate }: { id: string; autoFocus?: bool
     openWith({ recents: loadRecents(), products: [], loading: false })
   }, [openWith])
 
+  const updateText = useCallback((next: string) => {
+    setText(next)
+    if (next.trim().length < 2) {
+      abortRef.current?.abort()
+      setState((s) => ({ ...s, loading: false, products: [], activeIdx: -1 }))
+    }
+  }, [])
+
   /* debounced suggestions */
   useEffect(() => {
     const q = text.trim()
     if (q.length < 2) {
       abortRef.current?.abort()
-      setState((s) => ({ ...s, loading: false, products: [] }))
       return
     }
     const t = setTimeout(async () => {
@@ -183,7 +190,7 @@ function SearchBox({ id, autoFocus, onNavigate }: { id: string; autoFocus?: bool
 
   function goToProduct(p: ProductCardData) {
     close()
-    setText('')
+    updateText('')
     onNavigate?.()
     navigate('product', { slug: p.slug })
   }
@@ -243,7 +250,7 @@ function SearchBox({ id, autoFocus, onNavigate }: { id: string; autoFocus?: bool
           id={id}
           ref={inputRef}
           value={text}
-          onChange={(e) => setText(e.target.value)}
+          onChange={(e) => updateText(e.target.value)}
           onFocus={handleFocus}
           onKeyDown={onKeyDown}
           autoComplete="off"
@@ -257,7 +264,7 @@ function SearchBox({ id, autoFocus, onNavigate }: { id: string; autoFocus?: bool
             aria-label="Clear search"
             className="absolute right-2.5 top-1/2 -translate-y-1/2 text-stone-400 hover:text-stone-600"
             onClick={() => {
-              setText('')
+              updateText('')
               inputRef.current?.focus()
             }}
           >
@@ -451,6 +458,7 @@ export default function Header() {
       freeShipThreshold: number
       baseShipFee: number
       codFee: number
+      codEnabled?: boolean
       categories: Cat[]
     }>('/api/home').then((r) => {
       if (!alive || !r.ok || !r.data) return
@@ -462,6 +470,7 @@ export default function Header() {
         freeShipThreshold: r.data.freeShipThreshold,
         baseShipFee: r.data.baseShipFee,
         codFee: r.data.codFee,
+        codEnabled: r.data.codEnabled ?? true,
       })
       setCategories(r.data.categories ?? [])
       categoriesSnapshot = r.data.categories ?? []

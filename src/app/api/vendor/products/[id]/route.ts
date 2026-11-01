@@ -1,6 +1,6 @@
 import type { NextRequest } from 'next/server'
 import { db } from '@/lib/db'
-import { ok, fail, handleError, HttpError, requireVendor, round2, logAudit } from '@/lib/api'
+import { ok, fail, handleError, HttpError, requireVendorPermission, round2, logAudit } from '@/lib/api'
 
 type Params = { params: Promise<{ id: string }> }
 
@@ -13,10 +13,10 @@ async function getOwnedProduct(id: string, vendorId: string) {
   return product
 }
 
-// ---------------- PATCH: partial update (owner only) ----------------
+// ---------------- PATCH: partial update (owner or PRODUCT_MANAGER) ----------------
 export async function PATCH(req: NextRequest, { params }: Params) {
   try {
-    const { user, vendor } = await requireVendor()
+    const { user, vendor } = await requireVendorPermission('products', { allowPending: true })
     const { id } = await params
     const product = await getOwnedProduct(id, vendor.id)
     const body = (await req.json().catch(() => ({}))) as Record<string, unknown>
@@ -128,7 +128,7 @@ export async function PATCH(req: NextRequest, { params }: Params) {
 // ---------------- DELETE: soft archive ----------------
 export async function DELETE(_req: NextRequest, { params }: Params) {
   try {
-    const { user, vendor } = await requireVendor()
+    const { user, vendor } = await requireVendorPermission('products', { allowPending: true })
     const { id } = await params
     const product = await getOwnedProduct(id, vendor.id)
 

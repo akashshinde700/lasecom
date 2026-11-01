@@ -44,6 +44,9 @@ export const ORDER_STATUS_LABEL: Record<string, string> = {
   CANCELLED: 'Cancelled',
   PROCESSING: 'Processing',
   PACKED: 'Packed',
+  RETURN_REQUESTED: 'Return Requested',
+  RETURN_REJECTED: 'Return Rejected',
+  REFUNDED: 'Refunded',
 }
 
 export const PAYMENT_STATUS_LABEL: Record<string, string> = {
@@ -80,6 +83,7 @@ export function statusColor(status: string): string {
       return 'bg-violet-100 text-violet-700'
     case 'CANCELLED':
     case 'REJECTED':
+    case 'RETURN_REJECTED':
     case 'FAILED':
     case 'SUSPENDED':
     case 'BLOCKED':

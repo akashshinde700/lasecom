@@ -88,6 +88,7 @@ export type SessionUser = {
   phone: string | null
   role: string
   status: string
+  staffRole?: string | null
   vendor?: { id: string; name: string; status: string; slug: string } | null
 }
 
@@ -114,6 +115,7 @@ export type AppSettings = {
   freeShipThreshold: number
   baseShipFee: number
   codFee: number
+  codEnabled?: boolean
 }
 
 type AppState = {
@@ -135,6 +137,8 @@ type AppState = {
   setCartCount: (n: number) => void
   refreshCartCount: () => Promise<void>
   guestCart: GuestCartItem[]
+  guestCouponCode: string | null
+  setGuestCouponCode: (code: string | null) => void
   addToGuestCart: (item: GuestCartItem) => void
   updateGuestQty: (productId: string, variantId: string | null, qty: number) => void
   removeGuestItem: (productId: string, variantId: string | null) => void
@@ -234,6 +238,8 @@ export const useAppStore = create<AppState>()(
       },
 
       guestCart: [],
+      guestCouponCode: null,
+      setGuestCouponCode: (code) => set({ guestCouponCode: code }),
       addToGuestCart: (item) => {
         const cart = get().guestCart
         const idx = cart.findIndex(
@@ -264,10 +270,11 @@ export const useAppStore = create<AppState>()(
         })
         set({ cartCount: get().guestCart.reduce((s, i) => s + i.qty, 0) })
       },
-      clearGuestCart: () => set({ guestCart: [], cartCount: 0 }),
+      clearGuestCart: () => set({ guestCart: [], guestCouponCode: null, cartCount: 0 }),
       mergeGuestCartOnLogin: async () => {
         const guest = get().guestCart
-        if (guest.length === 0) return
+        const couponCode = get().guestCouponCode
+        if (guest.length === 0 && !couponCode) return
         for (const item of guest) {
           await apiFetch('/api/cart/items', {
             method: 'POST',
@@ -275,7 +282,14 @@ export const useAppStore = create<AppState>()(
             body: JSON.stringify({ productId: item.productId, variantId: item.variantId ?? null, qty: item.qty }),
           })
         }
-        set({ guestCart: [] })
+        if (couponCode) {
+          await apiFetch('/api/cart/coupon', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ code: couponCode }),
+          })
+        }
+        set({ guestCart: [], guestCouponCode: null })
         get().refreshCartCount()
       },
 
@@ -294,7 +308,8 @@ export const useAppStore = create<AppState>()(
     {
       name: 'shopkart-guest-cart',
       storage: createJSONStorage(() => localStorage),
-      partialize: (state) => ({ guestCart: state.guestCart }) as unknown as AppState,
+      partialize: (state) =>
+        ({ guestCart: state.guestCart, guestCouponCode: state.guestCouponCode }) as unknown as AppState,
     }
   )
 )

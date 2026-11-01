@@ -1,8 +1,9 @@
 import { createHmac } from 'crypto'
 import { NextRequest } from 'next/server'
 import { db } from '@/lib/db'
-import { ok, handleError, HttpError } from '@/lib/api'
-import { getSessionUser } from '@/lib/auth'
+import { ok, handleError, HttpError, canAccessOrder } from '@/lib/api'
+import { getSessionUser, getSigningSecret } from '@/lib/auth'
+import { isMockPaymentAllowed } from '@/lib/order-payment'
 
 /**
  * POST /api/payments/razorpay/create
@@ -11,17 +12,8 @@ import { getSessionUser } from '@/lib/auth'
  * Creates a Razorpay Order via the official REST API and returns checkout
  * params for the browser Razorpay Checkout widget.
  *
- * When RAZORPAY_KEY_ID / RAZORPAY_KEY_SECRET are NOT configured, the route
- * runs in DEMO mode: it returns { mode: 'demo' } with a fake order id so the
- * UI can simulate the Razorpay checkout window. Verification of demo orders
- * is accepted only while keys remain unconfigured (see verify route).
- *
- * Response (live):  { mode: 'live', keyId, razorpayOrderId, verifyToken, amount, currency, orderNumber }
- * Response (demo):  { mode: 'demo', razorpayOrderId, verifyToken, amount, currency, orderNumber }
- *
- * `verifyToken` = HMAC(orderId|razorpayOrderId|amountPaise) — the browser must
- * return it to /verify so the server can bind the gateway order to this
- * internal order + amount (anti-replay across orders).
+ * When RAZORPAY_KEY_ID / RAZORPAY_KEY_SECRET are NOT configured (and demo
+ * payments are allowed), returns { mode: 'demo' } with an HMAC-bound token.
  */
 export async function POST(req: NextRequest) {
   try {
@@ -35,8 +27,7 @@ export async function POST(req: NextRequest) {
     })
     if (!order) throw new HttpError('Order not found', 404)
 
-    // Auth: registered owner only; guest orders are payable with the order id.
-    if (order.userId && (!user || user.id !== order.userId)) {
+    if (!(await canAccessOrder(order, user))) {
       throw new HttpError('You are not authorized to pay for this order', 403)
     }
     if (order.paymentMethod === 'COD') {
@@ -47,11 +38,12 @@ export async function POST(req: NextRequest) {
       return ok({ mode: 'already_paid', orderNumber: order.orderNumber, orderId: order.id })
     }
 
-    const keyId = process.env.RAZORPAY_KEY_ID
-    const keySecret = process.env.RAZORPAY_KEY_SECRET
+    const keyId = process.env.RAZORPAY_KEY_ID?.trim()
+    const keySecret = process.env.RAZORPAY_KEY_SECRET?.trim()
+    const signingKey = keySecret || getSigningSecret()
     const amountPaise = Math.round(order.grandTotal * 100)
     const signFor = (rpOrderId: string) =>
-      createHmac('sha256', keySecret || 'lastrivon-demo-signing')
+      createHmac('sha256', signingKey)
         .update(`${order.id}|${rpOrderId}|${amountPaise}`)
         .digest('hex')
 
@@ -61,9 +53,9 @@ export async function POST(req: NextRequest) {
       orderId: order.id,
       orderNumber: order.orderNumber,
       prefill: {
-        name: order.guestName ?? '',
-        email: order.guestEmail ?? '',
-        contact: order.guestPhone ?? '',
+        name: order.guestName ?? user?.name ?? '',
+        email: order.guestEmail ?? user?.email ?? '',
+        contact: order.guestPhone ?? user?.phone ?? '',
       },
     }
 
@@ -96,7 +88,11 @@ export async function POST(req: NextRequest) {
       return ok({ mode: 'live', keyId, razorpayOrderId: rpJson.id, verifyToken: signFor(rpJson.id), ...base })
     }
 
-    // ---- DEMO mode (no keys configured) ----
+    // ---- DEMO mode (non-production only unless ALLOW_DEMO_PAYMENTS === 'true') ----
+    if (!isMockPaymentAllowed()) {
+      throw new HttpError('Payment gateway is not configured', 503)
+    }
+
     const demoId = 'demo_order_' + order.id.slice(-10) + '_' + Date.now().toString(36)
     return ok({
       mode: 'demo',

@@ -1,13 +1,13 @@
 import type { NextRequest } from 'next/server'
-import { ok, handleError, HttpError, requireActiveVendor } from '@/lib/api'
+import { ok, handleError, HttpError, requireVendorPermission } from '@/lib/api'
 import { resolveReturnRequest } from '@/lib/suborder'
 
 type Params = { params: Promise<{ id: string }> }
 
-// ------- POST: approve / reject a return request (vendor-isolated, active vendor only) -------
+// ------- POST: approve / reject a return request (vendor-isolated, active vendor, owner or ORDER_MANAGER) -------
 export async function POST(req: NextRequest, { params }: Params) {
   try {
-    const { user, vendor } = await requireActiveVendor()
+    const { user, vendor } = await requireVendorPermission('returns')
     const { id } = await params
     const body = (await req.json().catch(() => ({}))) as Record<string, unknown>
     const action = body.action

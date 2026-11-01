@@ -135,6 +135,8 @@ export function CartItemThumb({ src, alt }: { src: string | null; alt: string })
 export default function CartView() {
   const user = useAppStore((s) => s.user)
   const guestCart = useAppStore((s) => s.guestCart)
+  const guestCouponCode = useAppStore((s) => s.guestCouponCode)
+  const setGuestCouponCode = useAppStore((s) => s.setGuestCouponCode)
   const settings = useAppStore((s) => s.settings)
   const navigate = useAppStore((s) => s.navigate)
   const updateGuestQty = useAppStore((s) => s.updateGuestQty)
@@ -204,13 +206,14 @@ export default function CartView() {
     if (user) load()
   }, [user, load])
 
-  // Re-validate coupon discount whenever the basket value changes.
+  // Re-validate coupon discount whenever the basket value changes (or load persisted guest coupon).
   const itemsTotalRaw = useMemo(
     () => (items ?? []).reduce((s, i) => s + i.price * i.qty, 0),
     [items]
   )
+  const activeCouponCode = coupon?.code ?? (!user ? guestCouponCode : null)
   useEffect(() => {
-    const code = coupon?.code
+    const code = activeCouponCode
     if (!code || itemsTotalRaw <= 0) return
     let cancelled = false
     api<{ code: string; discount: number; description: string | null }>('/api/coupons/validate', {
@@ -222,12 +225,13 @@ export default function CartView() {
         setCoupon({ code: v.data.code, discount: v.data.discount, description: v.data.description })
       } else {
         setCoupon(null)
+        if (!user) setGuestCouponCode(null)
       }
     })
     return () => {
       cancelled = true
     }
-  }, [itemsTotalRaw])
+  }, [activeCouponCode, itemsTotalRaw, user, setGuestCouponCode])
 
   const groups = useMemo(() => {
     const map = new Map<string, { vendorName: string; subtotal: number; anyFreeShipping: boolean; items: UnifiedCartItem[] }>()
@@ -326,6 +330,7 @@ export default function CartView() {
         return
       }
       setCoupon({ code: res.data.code, discount: res.data.discount, description: res.data.description })
+      setGuestCouponCode(res.data.code)
       toast.success(`Coupon ${res.data.code} applied`)
     }
     setCouponInput('')
@@ -334,6 +339,8 @@ export default function CartView() {
   const removeCoupon = async () => {
     if (user) {
       await api('/api/cart/coupon', { method: 'DELETE' })
+    } else {
+      setGuestCouponCode(null)
     }
     setCoupon(null)
     toast.success('Coupon removed')

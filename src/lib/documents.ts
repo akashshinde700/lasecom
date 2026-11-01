@@ -54,6 +54,7 @@ export type DocData = {
   discount?: number
   discountLabel?: string
   shipping?: number
+  codFee?: number
   gstRate: number
   interState: boolean
   notes: string[]
@@ -111,11 +112,14 @@ export function amountInWords(amount: number): string {
   return `${r} Rupees${paise ? ` and ${words999(paise)} Paise` : ''} Only`
 }
 
-export function computeTotals(d: Pick<DocData, 'lines' | 'discount' | 'shipping' | 'gstRate' | 'interState'>) {
+export function computeTotals(
+  d: Pick<DocData, 'lines' | 'discount' | 'shipping' | 'codFee' | 'gstRate' | 'interState'>
+) {
   const itemsTotal = d.lines.reduce((s, l) => s + l.qty * l.rate, 0)
   const discount = Math.min(d.discount ?? 0, itemsTotal)
   const shipping = d.shipping ?? 0
-  const grand = Math.round((itemsTotal - discount + shipping) * 100) / 100
+  const codFee = d.codFee ?? 0
+  const grand = Math.round((itemsTotal - discount + shipping + codFee) * 100) / 100
   const factor = 1 + d.gstRate / 100
   const taxable = Math.round((grand / factor) * 100) / 100
   const tax = Math.round((grand - taxable) * 100) / 100
@@ -124,6 +128,7 @@ export function computeTotals(d: Pick<DocData, 'lines' | 'discount' | 'shipping'
     itemsTotal,
     discount,
     shipping,
+    codFee,
     taxable,
     tax,
     cgst: d.interState ? 0 : half,
@@ -249,6 +254,7 @@ export function renderDocumentHtml(d: DocData): string {
       ${totalRow('Items total', money(t.itemsTotal))}
       ${t.discount > 0 ? totalRow(d.discountLabel || 'Discount', '- ' + money(t.discount)) : ''}
       ${t.shipping > 0 ? totalRow('Shipping', money(t.shipping)) : ''}
+      ${t.codFee > 0 ? totalRow('COD handling fee', money(t.codFee)) : ''}
       ${totalRow('Taxable value', money(t.taxable))}
       ${d.interState
         ? totalRow(`IGST @ ${d.gstRate}%`, money(t.igst))

@@ -1,8 +1,6 @@
-import { NextRequest } from 'next/server'
 import { Prisma } from '@prisma/client'
 import { db } from '@/lib/db'
-import { ok, handleError } from '@/lib/api'
-import { parseJson } from '@/lib/format'
+import { ok, handleError, PUBLIC_PRODUCT_WHERE } from '@/lib/api'
 
 // Explicit select — never `include` on Product: `cost` / `commissionPercent`
 // are internal columns that must not reach anonymous clients.
@@ -26,6 +24,7 @@ const productCardSelect = {
   brand: { select: { name: true, slug: true } },
   category: { select: { name: true, slug: true } },
   vendor: { select: { name: true, slug: true } },
+  _count: { select: { variants: true } },
 } satisfies Prisma.ProductSelect
 
 export async function GET() {
@@ -42,31 +41,31 @@ export async function GET() {
         include: { children: { where: { active: true }, orderBy: { sortOrder: 'asc' } } },
       }),
       db.product.findMany({
-        where: { status: 'ACTIVE', isFeatured: true },
+        where: { ...PUBLIC_PRODUCT_WHERE, isFeatured: true },
         select: productCardSelect,
         take: 10,
         orderBy: { createdAt: 'desc' },
       }),
       db.product.findMany({
-        where: { status: 'ACTIVE', badge: 'BESTSELLER' },
+        where: { ...PUBLIC_PRODUCT_WHERE, badge: 'BESTSELLER' },
         select: productCardSelect,
         take: 10,
         orderBy: { soldCount: 'desc' },
       }),
       db.product.findMany({
-        where: { status: 'ACTIVE', badge: 'NEW_ARRIVAL' },
+        where: { ...PUBLIC_PRODUCT_WHERE, badge: 'NEW_ARRIVAL' },
         select: productCardSelect,
         take: 10,
         orderBy: { createdAt: 'desc' },
       }),
       db.product.findMany({
-        where: { status: 'ACTIVE', sponsored: true },
+        where: { ...PUBLIC_PRODUCT_WHERE, sponsored: true },
         select: productCardSelect,
         take: 6,
         orderBy: { updatedAt: 'desc' },
       }),
       db.product.findMany({
-        where: { status: 'ACTIVE', condition: 'REFURBISHED' },
+        where: { ...PUBLIC_PRODUCT_WHERE, condition: 'REFURBISHED' },
         select: productCardSelect,
         take: 10,
         orderBy: [{ soldCount: 'desc' }, { rating: 'desc' }],
@@ -85,6 +84,7 @@ export async function GET() {
       freeShipThreshold: parseFloat(settingsMap['shipping.freeThreshold'] ?? '499'),
       baseShipFee: parseFloat(settingsMap['shipping.baseFee'] ?? '49'),
       codFee: parseFloat(settingsMap['shipping.codFee'] ?? '25'),
+      codEnabled: settingsMap['cod.enabled'] !== 'false',
       banners,
       categories,
       featured,

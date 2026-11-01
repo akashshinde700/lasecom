@@ -41,11 +41,13 @@ export async function GET() {
     const vendorId = vendor.id
     const dayStart = startOfDay(subDays(new Date(), 13))
 
+    const confirmedSubFilter: { status: { notIn: string[] } } = { status: { notIn: ['CANCELLED', 'PENDING_PAYMENT'] } }
+
     const [plan, subAgg, statusGroups, ledgerUnsettled, productCount, activeProducts, recentSubs, itemRows] =
       await Promise.all([
         db.subscriptionPlan.findUnique({ where: { id: vendor.planId ?? '' } }),
         db.subOrder.aggregate({
-          where: { vendorId, status: { not: 'CANCELLED' } },
+          where: { vendorId, ...confirmedSubFilter },
           _sum: { itemsTotal: true, vendorEarning: true, commissionTotal: true },
         }),
         db.subOrder.groupBy({ by: ['status'], where: { vendorId }, _count: true }),
@@ -56,11 +58,11 @@ export async function GET() {
           select: { id: true, title: true, stock: true, lowStockThreshold: true },
         }),
         db.subOrder.findMany({
-          where: { vendorId, status: { not: 'CANCELLED' }, createdAt: { gte: dayStart } },
+          where: { vendorId, ...confirmedSubFilter, createdAt: { gte: dayStart } },
           select: { itemsTotal: true, createdAt: true },
         }),
         db.orderItem.findMany({
-          where: { subOrder: { vendorId, status: { not: 'CANCELLED' } } },
+          where: { status: { not: 'CANCELLED' }, subOrder: { vendorId, ...confirmedSubFilter } },
           select: { productId: true, titleSnapshot: true, qty: true, effectiveTotal: true },
         }),
       ])

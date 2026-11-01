@@ -18,16 +18,25 @@ const productCardSelect = {
   sellerType: true,
   freeShipping: true,
   weightGrams: true,
+  condition: true,
+  refurbGrade: true,
   brand: { select: { name: true, slug: true } },
   category: { select: { name: true, slug: true } },
   vendor: { select: { name: true, slug: true } },
+  _count: { select: { variants: true } },
 } satisfies Prisma.ProductSelect
 
 export async function GET() {
   try {
     const user = await requireUser()
     const items = await db.wishlistItem.findMany({
-      where: { userId: user.id },
+      where: {
+        userId: user.id,
+        product: {
+          status: 'ACTIVE',
+          OR: [{ vendorId: null }, { vendor: { status: 'ACTIVE' } }],
+        },
+      },
       orderBy: { createdAt: 'desc' },
       select: { id: true, product: { select: productCardSelect } },
     })
@@ -45,20 +54,23 @@ export async function POST(req: NextRequest) {
     const productId = body.productId ?? ''
     if (!productId) throw new HttpError('productId is required')
 
-    const product = await db.product.findUnique({
-      where: { id: productId },
-      select: { id: true, status: true },
-    })
-    if (!product || product.status !== 'ACTIVE') throw new HttpError('Product not found', 404)
-
     const existing = await db.wishlistItem.findUnique({
       where: { userId_productId: { userId: user.id, productId } },
       select: { id: true },
     })
 
+    // Always allow removing an already-saved item even if later archived/suspended
     if (existing) {
       await db.wishlistItem.delete({ where: { id: existing.id } })
       return ok({ wishlisted: false })
+    }
+
+    const product = await db.product.findUnique({
+      where: { id: productId },
+      select: { id: true, status: true, vendorId: true, vendor: { select: { status: true } } },
+    })
+    if (!product || product.status !== 'ACTIVE' || (product.vendorId && product.vendor?.status !== 'ACTIVE')) {
+      throw new HttpError('Product not found', 404)
     }
 
     await db.wishlistItem.create({ data: { userId: user.id, productId } })

@@ -395,10 +395,12 @@ const PRODUCT_STATUS_LABELS: Record<string, string> = {
 export function ProductsSection({
   dash,
   readOnly,
+  canAdjustStock = !readOnly,
   onDashChanged,
 }: {
   dash: VendorDashboard | null
   readOnly: boolean
+  canAdjustStock?: boolean
   onDashChanged: () => void
 }) {
   const [searchText, setSearchText] = useState('')
@@ -645,7 +647,7 @@ export function ProductsSection({
                       </span>
                     </TableCell>
                     <TableCell className="pr-4">
-                      {!readOnly && (
+                      {(!readOnly || canAdjustStock) && (
                         <DropdownMenu>
                           <DropdownMenuTrigger asChild>
                             <Button variant="ghost" size="icon" className="h-8 w-8 text-stone-400" aria-label={`Actions for ${p.title}`}>
@@ -653,24 +655,32 @@ export function ProductsSection({
                             </Button>
                           </DropdownMenuTrigger>
                           <DropdownMenuContent align="end" className="w-44">
-                            <DropdownMenuItem
-                              onClick={() => {
-                                setEditProduct(p)
-                                setFormOpen(true)
-                              }}
-                            >
-                              <Pencil /> Edit
-                            </DropdownMenuItem>
-                            <DropdownMenuItem onClick={() => setStockTarget(p)}>
-                              <PackagePlus /> Adjust Stock
-                            </DropdownMenuItem>
-                            <DropdownMenuSeparator />
-                            <DropdownMenuItem
-                              className="text-red-600 focus:bg-red-50 focus:text-red-600"
-                              onClick={() => setArchiveTarget(p)}
-                            >
-                              <Archive /> Archive
-                            </DropdownMenuItem>
+                            {!readOnly && (
+                              <DropdownMenuItem
+                                onClick={() => {
+                                  setEditProduct(p)
+                                  setFormOpen(true)
+                                }}
+                              >
+                                <Pencil /> Edit
+                              </DropdownMenuItem>
+                            )}
+                            {canAdjustStock && (
+                              <DropdownMenuItem onClick={() => setStockTarget(p)}>
+                                <PackagePlus /> Adjust Stock
+                              </DropdownMenuItem>
+                            )}
+                            {!readOnly && (
+                              <>
+                                <DropdownMenuSeparator />
+                                <DropdownMenuItem
+                                  className="text-red-600 focus:bg-red-50 focus:text-red-600"
+                                  onClick={() => setArchiveTarget(p)}
+                                >
+                                  <Archive /> Archive
+                                </DropdownMenuItem>
+                              </>
+                            )}
                           </DropdownMenuContent>
                         </DropdownMenu>
                       )}
@@ -705,30 +715,36 @@ export function ProductsSection({
                     </p>
                   </div>
                 </div>
-                {!readOnly && (
+                {(!readOnly || canAdjustStock) && (
                   <div className="mt-3 flex gap-2 border-t pt-3">
-                    <Button
-                      variant="outline"
-                      size="sm"
-                      className="flex-1"
-                      onClick={() => {
-                        setEditProduct(p)
-                        setFormOpen(true)
-                      }}
-                    >
-                      <Pencil /> Edit
-                    </Button>
-                    <Button variant="outline" size="sm" className="flex-1" onClick={() => setStockTarget(p)}>
-                      <PackagePlus /> Stock
-                    </Button>
-                    <Button
-                      variant="outline"
-                      size="sm"
-                      className="border-red-200 text-red-600 hover:bg-red-50"
-                      onClick={() => setArchiveTarget(p)}
-                    >
-                      <Archive /> Archive
-                    </Button>
+                    {!readOnly && (
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        className="flex-1"
+                        onClick={() => {
+                          setEditProduct(p)
+                          setFormOpen(true)
+                        }}
+                      >
+                        <Pencil /> Edit
+                      </Button>
+                    )}
+                    {canAdjustStock && (
+                      <Button variant="outline" size="sm" className="flex-1" onClick={() => setStockTarget(p)}>
+                        <PackagePlus /> Stock
+                      </Button>
+                    )}
+                    {!readOnly && (
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        className="border-red-200 text-red-600 hover:bg-red-50"
+                        onClick={() => setArchiveTarget(p)}
+                      >
+                        <Archive /> Archive
+                      </Button>
+                    )}
                   </div>
                 )}
               </Card>
@@ -1295,7 +1311,13 @@ export function OrdersSection({
 // Returns
 // ============================================================
 
-export function ReturnsSection({ onDashChanged }: { onDashChanged: () => void }) {
+export function ReturnsSection({
+  readOnly = false,
+  onDashChanged,
+}: {
+  readOnly?: boolean
+  onDashChanged: () => void
+}) {
   const [items, setItems] = useState<VendorReturn[] | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
@@ -1386,7 +1408,7 @@ export function ReturnsSection({ onDashChanged }: { onDashChanged: () => void })
                       {formatDate(r.createdAt)}
                       {r.status === 'PENDING' ? ` · refund ${formatINR2(amount)}` : ''}
                     </p>
-                    {r.status === 'PENDING' && (
+                    {r.status === 'PENDING' && !readOnly && (
                       <div className="flex gap-2">
                         <Button
                           size="sm"
@@ -1484,6 +1506,10 @@ export function FinanceSection() {
 
   function exportCsv() {
     if (!data) return
+    const esc = (c: string) => {
+      const safe = /^[=+\-@\t\r]/.test(c) ? `'${c}` : c
+      return `"${safe.replaceAll('"', '""')}"`
+    }
     const rows: string[][] = [['Date', 'Type', 'Direction', 'Amount (INR)', 'Notes', 'Settled']]
     for (const l of data.ledger) {
       rows.push([
@@ -1495,7 +1521,7 @@ export function FinanceSection() {
         l.settled ? 'yes' : 'no',
       ])
     }
-    const csv = rows.map((r) => r.map((c) => `"${c.replaceAll('"', '""')}"`).join(',')).join('\n')
+    const csv = rows.map((r) => r.map(esc).join(',')).join('\n')
     const blob = new Blob([csv], { type: 'text/csv;charset=utf-8' })
     const url = URL.createObjectURL(blob)
     const a = document.createElement('a')
@@ -1919,7 +1945,15 @@ export function StaffSection({ readOnly }: { readOnly: boolean }) {
 // Store settings
 // ============================================================
 
-export function StoreSection({ dash, onSaved }: { dash: VendorDashboard | null; onSaved: () => void }) {
+export function StoreSection({
+  dash,
+  readOnly = false,
+  onSaved,
+}: {
+  dash: VendorDashboard | null
+  readOnly?: boolean
+  onSaved: () => void
+}) {
   const navigate = useAppStore((s) => s.navigate)
 
   const [name, setName] = useState(dash?.vendor.name ?? '')
@@ -1932,27 +1966,45 @@ export function StoreSection({ dash, onSaved }: { dash: VendorDashboard | null; 
   const [bankAccountName, setBankAccountName] = useState('')
   const [bankAccountNumber, setBankAccountNumber] = useState('')
   const [bankIfsc, setBankIfsc] = useState('')
+  const [profileLoaded, setProfileLoaded] = useState(false)
   const [busy, setBusy] = useState(false)
 
-  const slug = dash?.vendor.slug ?? ''
-
-  // Public store page carries description/city/state — use it to prefill what the
-  // dashboard payload does not include (phone/GSTIN/bank stay blank for privacy).
+  // Prefill ALL profile & payout fields from owner-only GET /api/vendor/profile
+  // so saving never overwrites existing GSTIN / phone / pickup / bank details with null.
   useEffect(() => {
-    if (!slug) return
-    api<{ vendor: { description: string | null; city: string | null; state: string | null } }>(
-      `/api/vendors/${slug}`
-    ).then((res) => {
+    api<{
+      vendor: {
+        name: string
+        description: string | null
+        phone: string | null
+        city: string | null
+        state: string | null
+        gstin: string | null
+        pickupAddress: string | null
+        bankAccountName: string | null
+        bankAccountNumber: string | null
+        bankIfsc: string | null
+      }
+    }>('/api/vendor/profile').then((res) => {
       const v = res.ok ? res.data?.vendor : null
       if (v) {
-        setDescription((p) => p || v.description || '')
-        setCity((p) => p || v.city || '')
-        setStateField((p) => p || v.state || '')
+        setName(v.name || '')
+        setDescription(v.description || '')
+        setPhone(v.phone || '')
+        setCity(v.city || '')
+        setStateField(v.state || '')
+        setGstin(v.gstin || '')
+        setPickupAddress(v.pickupAddress || '')
+        setBankAccountName(v.bankAccountName || '')
+        setBankAccountNumber(v.bankAccountNumber || '')
+        setBankIfsc(v.bankIfsc || '')
       }
+      setProfileLoaded(true)
     })
-  }, [slug])
+  }, [])
 
   async function save() {
+    if (readOnly) return
     if (!name.trim()) {
       toast.error('Store name is required')
       return
@@ -2093,12 +2145,18 @@ export function StoreSection({ dash, onSaved }: { dash: VendorDashboard | null; 
         </CardContent>
       </Card>
 
-      <div className="flex justify-end">
-        <Button className="bg-orange-600 text-white hover:bg-orange-700" onClick={save} disabled={busy}>
-          {busy ? <span className="inline h-4 w-4 animate-spin rounded-full border-2 border-white/40 border-t-white" /> : null}
-          Save changes
-        </Button>
-      </div>
+      {!readOnly && (
+        <div className="flex justify-end">
+          <Button
+            className="bg-orange-600 text-white hover:bg-orange-700"
+            onClick={save}
+            disabled={busy || !profileLoaded}
+          >
+            {busy ? <span className="inline h-4 w-4 animate-spin rounded-full border-2 border-white/40 border-t-white" /> : null}
+            Save changes
+          </Button>
+        </div>
+      )}
     </div>
   )
 }

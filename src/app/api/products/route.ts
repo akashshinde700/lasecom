@@ -1,7 +1,7 @@
 import { NextRequest } from 'next/server'
 import { Prisma } from '@prisma/client'
 import { db } from '@/lib/db'
-import { ok, handleError, parsePage } from '@/lib/api'
+import { ok, handleError, parsePage, PUBLIC_PRODUCT_WHERE } from '@/lib/api'
 
 const productCardSelect = {
   id: true,
@@ -23,6 +23,7 @@ const productCardSelect = {
   brand: { select: { name: true, slug: true } },
   category: { select: { name: true, slug: true } },
   vendor: { select: { name: true, slug: true } },
+  _count: { select: { variants: true } },
 } satisfies Prisma.ProductSelect
 
 export async function GET(req: NextRequest) {
@@ -40,9 +41,10 @@ export async function GET(req: NextRequest) {
     const max = parseFloat(sp.get('max') || '')
     const rating = parseFloat(sp.get('rating') || '')
     const sponsoredOnly = sp.get('sponsored') === 'true'
+    const inStockOnly = sp.get('inStock') === 'true'
     const sort = sp.get('sort') || 'relevance'
 
-    const conditions: Prisma.ProductWhereInput[] = []
+    const conditions: Prisma.ProductWhereInput[] = [PUBLIC_PRODUCT_WHERE]
     if (search) {
       conditions.push({
         OR: [
@@ -59,7 +61,7 @@ export async function GET(req: NextRequest) {
       })
     }
     if (brandSlug) conditions.push({ brand: { slug: brandSlug } })
-    if (vendorSlug) conditions.push({ vendor: { slug: vendorSlug } })
+    if (vendorSlug) conditions.push({ vendor: { slug: vendorSlug, status: 'ACTIVE' } })
     if (badge) conditions.push({ badge })
     if (condition === 'NEW' || condition === 'REFURBISHED') conditions.push({ condition })
     if (!isNaN(min) || !isNaN(max)) {
@@ -72,8 +74,9 @@ export async function GET(req: NextRequest) {
     }
     if (!isNaN(rating) && rating > 0) conditions.push({ rating: { gte: rating } })
     if (sponsoredOnly) conditions.push({ sponsored: true })
+    if (inStockOnly) conditions.push({ stock: { gt: 0 } })
 
-    const where: Prisma.ProductWhereInput = { status: 'ACTIVE', AND: conditions }
+    const where: Prisma.ProductWhereInput = { AND: conditions }
 
     let orderBy: Prisma.ProductOrderByWithRelationInput[]
     switch (sort) {

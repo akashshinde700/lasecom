@@ -1,7 +1,7 @@
 import { NextRequest } from 'next/server'
 import { Prisma } from '@prisma/client'
 import { db } from '@/lib/db'
-import { ok, handleError, HttpError, requireUser, round2 } from '@/lib/api'
+import { ok, handleError, HttpError, requireUser, round2, PUBLIC_PRODUCT_WHERE } from '@/lib/api'
 
 const productCardSelect = {
   id: true,
@@ -32,7 +32,9 @@ export async function GET(req: NextRequest, { params }: { params: Promise<{ slug
     const { slug } = await params
 
     const product = await db.product.findFirst({
-      where: { OR: [{ slug }, { id: slug }] },
+      where: {
+        AND: [PUBLIC_PRODUCT_WHERE, { OR: [{ slug }, { id: slug }] }],
+      },
       select: {
         ...productCardSelect,
         status: true,
@@ -71,7 +73,11 @@ export async function GET(req: NextRequest, { params }: { params: Promise<{ slug
 
     const [related, reviews, totalReviews, breakdownGroups] = await Promise.all([
       db.product.findMany({
-        where: { status: 'ACTIVE', categoryId: product.categoryId, id: { not: product.id } },
+        where: {
+          ...PUBLIC_PRODUCT_WHERE,
+          categoryId: product.categoryId,
+          id: { not: product.id },
+        },
         select: productCardSelect,
         orderBy: [{ soldCount: 'desc' }, { rating: 'desc' }],
         take: 8,
@@ -110,7 +116,7 @@ export async function GET(req: NextRequest, { params }: { params: Promise<{ slug
 }
 
 /**
- * POST /api/products/:id/reviews — body { rating(1-5), title?, comment }
+ * POST /api/products/:slug — body { rating(1-5), title?, comment }
  * One review per user per product (upsert). verified=true if the user has a
  * DELIVERED order item for this product. Recomputes product rating aggregate.
  */
@@ -128,8 +134,10 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ slu
       typeof body.title === 'string' && body.title.trim() ? body.title.trim().slice(0, 100) : null
 
     const product = await db.product.findFirst({
-      where: { OR: [{ id: slug }, { slug }] },
-      select: { id: true, status: true },
+      where: {
+        AND: [PUBLIC_PRODUCT_WHERE, { OR: [{ id: slug }, { slug }] }],
+      },
+      select: { id: true, status: true, vendorId: true },
     })
     if (!product || product.status !== 'ACTIVE') throw new HttpError('Product not found', 404)
 
@@ -168,6 +176,21 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ slu
       where: { id: product.id },
       data: { rating: avgRating, reviewCount },
     })
+
+    if (product.vendorId) {
+      const vendorAgg = await db.review.aggregate({
+        where: { product: { vendorId: product.vendorId }, status: 'APPROVED' },
+        _avg: { rating: true },
+        _count: { rating: true },
+      })
+      await db.vendor.update({
+        where: { id: product.vendorId },
+        data: {
+          rating: round2(vendorAgg._avg.rating ?? 0),
+          ratingCount: vendorAgg._count.rating,
+        },
+      })
+    }
 
     return ok({ rating: avgRating, reviewCount, review })
   } catch (err) {

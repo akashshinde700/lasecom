@@ -1,10 +1,19 @@
 import type { NextRequest } from 'next/server'
 import { db } from '@/lib/db'
-import { ok, handleError, HttpError, requireAdmin, round2, logAudit, notify } from '@/lib/api'
+import {
+  ok,
+  handleError,
+  HttpError,
+  requireAdmin,
+  round2,
+  logAudit,
+  notify,
+  reverseSubOrderLedgerTx,
+} from '@/lib/api'
 
 type Params = { params: Promise<{ id: string }> }
 
-// ---------------- POST: admin force cancel (customer-cancel logic, no vendor isolation) ----------------
+// ---------------- POST: admin force cancel ----------------
 export async function POST(_req: NextRequest, { params }: Params) {
   try {
     const user = await requireAdmin()
@@ -26,7 +35,8 @@ export async function POST(_req: NextRequest, { params }: Params) {
     const shipped = order.subOrders.some((so) => so.status === 'SHIPPED' || so.status === 'DELIVERED')
     if (shipped) throw new HttpError('Cannot cancel — one or more items have already shipped', 400)
 
-    const wasPaid = order.paymentStatus === 'PAID'
+    const wasPaid = order.paymentStatus === 'PAID' || order.paymentStatus === 'PARTIALLY_REFUNDED'
+    let refundedAmount = 0
 
     await db.$transaction(async (tx) => {
       // restock + cancel sub-orders and their items
@@ -34,9 +44,21 @@ export async function POST(_req: NextRequest, { params }: Params) {
         if (so.status === 'CANCELLED') continue
         for (const item of so.items) {
           if (item.status === 'REFUNDED' || item.status === 'CANCELLED') continue
-          await tx.product.update({ where: { id: item.productId }, data: { stock: { increment: item.qty } } })
+          await tx.product.update({
+            where: { id: item.productId },
+            data: { stock: { increment: item.qty } },
+          })
+          if (wasPaid) {
+            await tx.product.updateMany({
+              where: { id: item.productId, soldCount: { gte: item.qty } },
+              data: { soldCount: { decrement: item.qty } },
+            })
+          }
           if (item.variantId) {
-            await tx.productVariant.update({ where: { id: item.variantId }, data: { stock: { increment: item.qty } } })
+            await tx.productVariant.update({
+              where: { id: item.variantId },
+              data: { stock: { increment: item.qty } },
+            })
           }
           await tx.stockMovement.create({
             data: {
@@ -54,38 +76,62 @@ export async function POST(_req: NextRequest, { params }: Params) {
         await tx.shipmentEvent.create({
           data: { subOrderId: so.id, status: 'CANCELLED', note: 'Order cancelled by platform admin' },
         })
-        // reverse vendor earning for paid orders
-        if (so.vendorId && wasPaid && so.vendorEarning > 0) {
-          await tx.vendorLedger.create({
-            data: {
-              vendorId: so.vendorId,
-              subOrderId: so.id,
-              type: 'REFUND_DEBIT',
-              direction: 'DEBIT',
-              amount: round2(so.vendorEarning),
-              notes: `Earning reversal — order ${order.orderNumber} cancelled by admin`,
-            },
-          })
+        if (so.vendorId && wasPaid) {
+          await reverseSubOrderLedgerTx(
+            tx,
+            so.vendorId,
+            so.id,
+            `Earning reversal — order ${order.orderNumber} cancelled by admin`
+          )
         }
       }
 
-      await tx.order.update({ where: { id: order.id }, data: { status: 'CANCELLED' } })
-
-      // refund if paid
+      // refund remaining balance if paid
       if (wasPaid) {
-        const payment = order.payments.find((p) => p.status === 'SUCCESS')
-        if (payment) {
-          await tx.refund.create({
-            data: {
-              paymentId: payment.id,
-              amount: round2(order.grandTotal),
-              reason: `Order ${order.orderNumber} cancelled by admin`,
-              status: 'SUCCESS',
-            },
+        const successPayments = order.payments.filter((p) => p.status === 'SUCCESS')
+        if (successPayments.length > 0) {
+          const prev = await tx.refund.aggregate({
+            where: { paymentId: { in: successPayments.map((p) => p.id) } },
+            _sum: { amount: true },
           })
-          await tx.order.update({ where: { id: order.id }, data: { paymentStatus: 'REFUNDED' } })
+          const alreadyRefunded = prev._sum.amount ?? 0
+          const remaining = round2(Math.max(0, order.grandTotal - alreadyRefunded))
+          if (remaining > 0) {
+            await tx.refund.create({
+              data: {
+                paymentId: successPayments[0].id,
+                amount: remaining,
+                reason: `Order ${order.orderNumber} cancelled by admin`,
+                status: 'SUCCESS',
+              },
+            })
+            refundedAmount = remaining
+          }
         }
       }
+
+      if (order.couponCode) {
+        const candidates = await tx.coupon.findMany({
+          where: { code: { contains: order.couponCode } },
+        })
+        const matched = candidates.find(
+          (c) => c.code.toUpperCase() === order.couponCode!.toUpperCase()
+        )
+        if (matched) {
+          await tx.coupon.updateMany({
+            where: { id: matched.id, usedCount: { gt: 0 } },
+            data: { usedCount: { decrement: 1 } },
+          })
+        }
+      }
+
+      await tx.order.update({
+        where: { id: order.id },
+        data: {
+          status: 'CANCELLED',
+          paymentStatus: wasPaid ? 'REFUNDED' : order.paymentStatus,
+        },
+      })
     })
 
     // notifications
@@ -93,12 +139,16 @@ export async function POST(_req: NextRequest, { params }: Params) {
       await notify(
         order.userId,
         `Order ${order.orderNumber} cancelled`,
-        `Your order has been cancelled by the platform.${wasPaid ? ' A full refund has been initiated.' : ''}`,
+        `Your order has been cancelled by the platform.${
+          refundedAmount > 0 ? ` A refund of ₹${refundedAmount.toFixed(2)} has been initiated.` : ''
+        }`,
         'ORDER'
       )
     }
+    const notifiedOwners = new Set<string>()
     for (const so of order.subOrders) {
-      if (so.vendor?.ownerId) {
+      if (so.vendor?.ownerId && !notifiedOwners.has(so.vendor.ownerId)) {
+        notifiedOwners.add(so.vendor.ownerId)
         await notify(
           so.vendor.ownerId,
           `Order ${order.orderNumber} cancelled`,
@@ -109,7 +159,7 @@ export async function POST(_req: NextRequest, { params }: Params) {
     }
 
     await logAudit(user, 'order.cancel', 'Order', order.id, `Force cancelled order ${order.orderNumber}`)
-    return ok({ cancelled: true, orderId: order.id })
+    return ok({ cancelled: true, orderId: order.id, refundAmount: refundedAmount })
   } catch (err) {
     return handleError(err)
   }

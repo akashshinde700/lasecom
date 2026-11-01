@@ -387,7 +387,7 @@ async function main() {
             unitPrice: it.price, qty: it.qty, lineTotal, discountShare, effectiveTotal,
             commissionRate: vid ? rate : 0, commissionAmount, vendorEarning: vid ? earning : 0,
             costSnapshot: it.cost, isPlatformOwned: !vid,
-            status: opts.delivered ? 'DELIVERED' : 'ACTIVE',
+            status: 'ACTIVE',
           },
         })
         await db.product.update({ where: { id: it.id }, data: { stock: { decrement: it.qty }, soldCount: { increment: it.qty } } })

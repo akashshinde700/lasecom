@@ -1,21 +1,20 @@
 import { randomBytes } from 'crypto'
 import { NextRequest } from 'next/server'
 import { db } from '@/lib/db'
-import { ok, handleError, HttpError } from '@/lib/api'
+import { ok, handleError, HttpError, canAccessOrder } from '@/lib/api'
 import { getSessionUser } from '@/lib/auth'
-import { markOrderPaid, markLatestPaymentFailed } from '@/lib/order-payment'
+import { markOrderPaid, markLatestPaymentFailed, isMockPaymentAllowed } from '@/lib/order-payment'
 
 /**
- * POST /api/payments/:orderId/pay — legacy mock payment gateway.
- * - Idempotent: a SUCCESS payment (or PAID order) returns immediately.
- * - Simulates ~90% success.
- * - SUCCESS state machine lives in lib/order-payment.ts (shared with Razorpay
- *   verify route): payment SUCCESS (fee 2%), order CONFIRMED + PAID, suborders
- *   CONFIRMED, ShipmentEvent CONFIRMED, VendorLedger entries, notifications.
- * - FAILED: payment row FAILED, order stays PENDING_PAYMENT (retry allowed).
+ * POST /api/payments/:orderId/pay — legacy simulated UPI/Card/Netbanking gateway.
+ * Restricted strictly to demo/non-production environments without live Razorpay keys.
  */
 export async function POST(_req: NextRequest, { params }: { params: Promise<{ orderId: string }> }) {
   try {
+    if (!isMockPaymentAllowed()) {
+      throw new HttpError('Simulated payment endpoint is disabled when live gateway or production mode is active', 403)
+    }
+
     const { orderId } = await params
     const user = await getSessionUser()
 
@@ -28,12 +27,14 @@ export async function POST(_req: NextRequest, { params }: { params: Promise<{ or
     })
     if (!order) throw new HttpError('Order not found', 404)
 
-    // Auth: registered owner only; guest orders are payable with the order id.
-    if (order.userId && (!user || user.id !== order.userId)) {
+    if (!(await canAccessOrder(order, user))) {
       throw new HttpError('You are not authorized to pay for this order', 403)
     }
     if (order.paymentMethod === 'COD') {
       throw new HttpError('This is a Cash on Delivery order. No online payment is required.', 400)
+    }
+    if (order.paymentMethod === 'RAZORPAY') {
+      throw new HttpError('Please complete payment through the Razorpay checkout flow.', 400)
     }
     if (order.status === 'CANCELLED') {
       throw new HttpError('This order has been cancelled', 409)

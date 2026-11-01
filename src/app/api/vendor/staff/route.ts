@@ -1,14 +1,14 @@
 import type { NextRequest } from 'next/server'
 import { db } from '@/lib/db'
-import { ok, handleError, HttpError, requireVendor, requireVendorAdmin, logAudit } from '@/lib/api'
+import { ok, handleError, HttpError, requireVendorAdmin, requireVendorPermission, logAudit } from '@/lib/api'
 import { hashPassword } from '@/lib/auth'
 
 const STAFF_ROLES = ['PRODUCT_MANAGER', 'ORDER_MANAGER', 'INVENTORY_MANAGER', 'ACCOUNTANT']
 
-// ---------------- GET: vendor staff list ----------------
+// ---------------- GET: vendor staff list (owner only) ----------------
 export async function GET() {
   try {
-    const { vendor } = await requireVendor()
+    const { vendor } = await requireVendorAdmin()
     const rows = await db.vendorStaff.findMany({
       where: { vendorId: vendor.id },
       orderBy: { createdAt: 'desc' },
@@ -28,10 +28,10 @@ export async function GET() {
   }
 }
 
-// ---------------- POST: create VENDOR_STAFF (owner only) ----------------
+// ---------------- POST: create VENDOR_STAFF (owner only; PENDING + ACTIVE allowed, SUSPENDED/REJECTED blocked) ----------------
 export async function POST(req: NextRequest) {
   try {
-    const { user, vendor } = await requireVendorAdmin()
+    const { user, vendor } = await requireVendorPermission('owner', { allowPending: true })
     const body = (await req.json().catch(() => ({}))) as Record<string, unknown>
     const name = typeof body.name === 'string' ? body.name.trim() : ''
     const email = typeof body.email === 'string' ? body.email.toLowerCase().trim() : ''

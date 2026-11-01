@@ -2,7 +2,7 @@ import { NextRequest } from 'next/server'
 import { randomBytes } from 'crypto'
 import { mkdir, writeFile } from 'fs/promises'
 import path from 'path'
-import { ok, handleError, HttpError, requireUser } from '@/lib/api'
+import { ok, handleError, HttpError, requireUser, requireVendorPermission } from '@/lib/api'
 import { MAX_UPLOAD_BYTES, sniffImage, uploadDir } from '@/lib/uploads'
 
 const ALLOWED_ROLES = ['PLATFORM_ADMIN', 'PLATFORM_STAFF', 'VENDOR_ADMIN', 'VENDOR_STAFF']
@@ -16,6 +16,9 @@ export async function POST(req: NextRequest) {
   try {
     const user = await requireUser()
     if (!ALLOWED_ROLES.includes(user.role)) throw new HttpError('Only admins and vendors can upload images', 403)
+    if (user.role === 'VENDOR_ADMIN' || user.role === 'VENDOR_STAFF') {
+      await requireVendorPermission('products', { allowPending: true })
+    }
 
     const form = await req.formData().catch(() => null)
     const file = form?.get('file')
@@ -30,8 +33,8 @@ export async function POST(req: NextRequest) {
 
     const name = `${randomBytes(16).toString('hex')}.${ext}`
     const dir = uploadDir()
-    await mkdir(dir, { recursive: true })
-    await writeFile(path.join(dir, name), buf)
+    await mkdir(/*turbopackIgnore: true*/ dir, { recursive: true })
+    await writeFile(path.join(/*turbopackIgnore: true*/ dir, name), buf)
 
     return ok({ url: `/api/files/${name}`, size: buf.length })
   } catch (err) {

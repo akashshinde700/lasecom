@@ -29,6 +29,7 @@ export type ProductCardData = {
   vendor?: { name: string; slug: string } | null
   brand?: { name: string; slug: string } | null
   category?: { name: string; slug: string } | null
+  _count?: { variants: number }
 }
 
 /** Human label for a refurb grade (returns null for NEW/unknown). */
@@ -176,6 +177,11 @@ export function useAddToCart() {
     variant: { id: string; name: string; price: number; stock: number } | null = null
   ): Promise<boolean> {
     const variantId = variant?.id ?? null
+    if (!variantId && (p._count?.variants ?? 0) > 0) {
+      toast.info('Please choose an option first')
+      navigate('product', { slug: p.slug })
+      return false
+    }
     if (!user) {
       addToGuestCart({
         productId: p.id,
@@ -207,6 +213,11 @@ export function useAddToCart() {
         action: { label: 'View Cart', onClick: () => navigate('cart') },
       })
       return true
+    }
+    if ((r.error ?? '').toLowerCase().includes('variant')) {
+      toast.info('Please choose an option first')
+      navigate('product', { slug: p.slug })
+      return false
     }
     toast.error(r.error ?? 'Failed to add to cart')
     return false

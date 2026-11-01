@@ -11,13 +11,14 @@ export async function POST(req: NextRequest) {
     if (action === 'register') {
       const { name, email, password, phone } = body
       if (!name || !email || !password) return fail('Name, email and password are required')
-      if (password.length < 6) return fail('Password must be at least 6 characters')
-      const existing = await db.user.findUnique({ where: { email: email.toLowerCase().trim() } })
+      if (String(password).length < 6) return fail('Password must be at least 6 characters')
+      const emailNorm = String(email).toLowerCase().trim()
+      const existing = await db.user.findUnique({ where: { email: emailNorm } })
       if (existing) return fail('An account with this email already exists')
       const user = await db.user.create({
         data: {
           name: String(name).trim(),
-          email: String(email).toLowerCase().trim(),
+          email: emailNorm,
           phone: phone ? String(phone).trim() : null,
           passwordHash: hashPassword(String(password)),
           role: 'CUSTOMER',
@@ -32,42 +33,52 @@ export async function POST(req: NextRequest) {
       if (!name || !email || !password || !businessName) {
         return fail('Owner name, email, password and business name are required')
       }
-      if (password.length < 6) return fail('Password must be at least 6 characters')
+      if (String(password).length < 6) return fail('Password must be at least 6 characters')
       const emailNorm = String(email).toLowerCase().trim()
       const existing = await db.user.findUnique({ where: { email: emailNorm } })
       if (existing) return fail('An account with this email already exists')
-      const baseSlug = businessName.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)/g, '')
-      let slug = baseSlug || 'vendor'
-      let attempt = 1
-      while (await db.vendor.findUnique({ where: { slug } })) {
-        attempt += 1
-        slug = `${baseSlug}-${attempt}`
-      }
-      const user = await db.user.create({
-        data: {
-          name: String(name).trim(),
-          email: emailNorm,
-          phone: phone ? String(phone).trim() : null,
-          passwordHash: hashPassword(String(password)),
-          role: 'VENDOR_ADMIN',
-        },
+
+      const baseSlug =
+        String(businessName)
+          .toLowerCase()
+          .replace(/[^a-z0-9]+/g, '-')
+          .replace(/(^-|-$)/g, '') || 'vendor'
+
+      const { user, vendor } = await db.$transaction(async (tx) => {
+        let slug = baseSlug
+        let attempt = 1
+        while (await tx.vendor.findUnique({ where: { slug } })) {
+          attempt += 1
+          slug = `${baseSlug}-${attempt}`
+        }
+        const createdUser = await tx.user.create({
+          data: {
+            name: String(name).trim(),
+            email: emailNorm,
+            phone: phone ? String(phone).trim() : null,
+            passwordHash: hashPassword(String(password)),
+            role: 'VENDOR_ADMIN',
+          },
+        })
+        const freePlan = await tx.subscriptionPlan.findFirst({ where: { name: 'Free' } })
+        const createdVendor = await tx.vendor.create({
+          data: {
+            name: String(businessName).trim(),
+            slug,
+            email: emailNorm,
+            phone: phone ? String(phone).trim() : null,
+            gstin: gstin ? String(gstin).trim() : null,
+            city: city ? String(city).trim() : null,
+            state: state ? String(state).trim() : null,
+            status: 'PENDING',
+            ownerId: createdUser.id,
+            planId: freePlan?.id ?? null,
+            logoText: String(businessName).trim().slice(0, 2).toUpperCase(),
+          },
+        })
+        return { user: createdUser, vendor: createdVendor }
       })
-      const freePlan = await db.subscriptionPlan.findFirst({ where: { name: 'Free' } })
-      const vendor = await db.vendor.create({
-        data: {
-          name: String(businessName).trim(),
-          slug,
-          email: emailNorm,
-          phone: phone ? String(phone).trim() : null,
-          gstin: gstin ? String(gstin).trim() : null,
-          city: city ? String(city).trim() : null,
-          state: state ? String(state).trim() : null,
-          status: 'PENDING',
-          ownerId: user.id,
-          planId: freePlan?.id ?? null,
-          logoText: String(businessName).trim().slice(0, 2).toUpperCase(),
-        },
-      })
+
       await createSession(user.id)
       return ok({ id: user.id, vendorId: vendor.id, role: user.role, vendorStatus: vendor.status })
     }
@@ -80,7 +91,9 @@ export async function POST(req: NextRequest) {
       if (!user || !verifyPassword(String(password), user.passwordHash)) {
         return fail('Invalid email or password', 401)
       }
-      if (user.status === 'BLOCKED') return fail('Your account has been blocked. Contact support.', 403)
+      if (user.status === 'BLOCKED' || user.status === 'SUSPENDED') {
+        return fail('Your account has been blocked. Contact support.', 403)
+      }
       await createSession(user.id)
       return ok({ id: user.id, name: user.name, email: user.email, role: user.role })
     }
@@ -101,6 +114,7 @@ export async function GET() {
     const session = await getSessionUser()
     if (!session) return ok({ user: null })
     let vendor: { id: string; name: string; status: string; slug: string } | null = null
+    let staffRole: string | null = null
     if (session.role === 'VENDOR_ADMIN') {
       const v = await db.vendor.findUnique({
         where: { ownerId: session.id },
@@ -110,11 +124,15 @@ export async function GET() {
     } else if (session.role === 'VENDOR_STAFF') {
       const staff = await db.vendorStaff.findUnique({
         where: { userId: session.id },
-        select: { vendor: { select: { id: true, name: true, status: true, slug: true } } },
+        select: {
+          staffRole: true,
+          vendor: { select: { id: true, name: true, status: true, slug: true } },
+        },
       })
       vendor = staff?.vendor ?? null
+      staffRole = staff?.staffRole ?? null
     }
-    return ok({ user: { ...session, vendor } })
+    return ok({ user: { ...session, staffRole, vendor } })
   } catch (err) {
     return handleError(err)
   }
